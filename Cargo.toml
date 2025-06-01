@@ -1,0 +1,50 @@
+[package]
+name = "pdf_engine"
+version = "1.0.0"
+edition = "2021"
+authors = ["kartik6717"]
+description = "PDF Processing Engine with forensic cleaning capabilities"
+
+[lib]
+name = "pdf_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pdf_engine"
+path = "src/bin/pdf_engine.rs"
+
+[dependencies]
+# PDF Processing
+lopdf = "0.31"                # Add this for PDF manipulation
+pdf = "0.8"                   # Add this for additional PDF support
+
+# Existing Core Dependencies
+tokio = { version = "1.28", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.3", features = ["derive"] }
+actix-web = "4.3"
+futures = "0.3"
+async-trait = "0.1"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.10"
+
+# Cryptography & Security (Already present, good for PDF security)
+sha2 = "0.10"
+aes = "0.8"
+base64 = "0.21"
+
+# Utility Dependencies
+regex = "1.8"
+uuid = { version = "1.3", features = ["v4"] }
+
+# Additional Security Features for PDF
+pkcs8 = "0.10"               # Add this for encryption support
+rand = "0.8"                 # Add this for secure random number generation
+
+[dev-dependencies]
+tokio-test = "0.4"
+assert_fs = "1.0"
+predicates = "3.0"

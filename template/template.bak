@@ -1,0 +1,160 @@
+// Auto-implemented by Alloma Placeholder Patcher
+// Timestamp: 2025-06-01 15:02:33
+// User: kartik6717
+// Note: Placeholder code has been replaced with actual implementations
+
+#![allow(warnings)]
+
+// Add to existing template.rs
+
+use super::context::{TemplateContext, TemplateContextManager};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateMetadata {
+    created_by: String,
+    created_at: DateTime<Utc>,
+    modified_by: String,
+    modified_at: DateTime<Utc>,
+    version_history: Vec<VersionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionInfo {
+    version: String,
+    modified_by: String,
+    modified_at: DateTime<Utc>,
+    changes: String,
+}
+
+impl PdfTemplate {
+    pub fn new_with_context(name: String) -> Result<Self, PdfError> {
+        let ctx_manager = TemplateContextManager::new()?;
+        let now = ctx_manager.get_current_time();
+        let user = ctx_manager.get_user_login();
+
+        Ok(PdfTemplate {
+            id: Uuid::new_v4(),
+            name,
+            version: "1.0.0".to_string(),
+            created_at: now,
+            updated_at: now,
+            author: user,
+            elements: Vec::new(),
+            layout: Layout::default(),
+            styles: HashMap::new(),
+            metadata: HashMap::new(),
+        })
+    }
+
+    pub fn update_metadata(&mut self) -> Result<(), PdfError> {
+        let ctx_manager = TemplateContextManager::new()?;
+        self.updated_at = ctx_manager.get_current_time();
+        self.metadata.insert("last_modified_by".to_string(), ctx_manager.get_user_login());
+        Ok(())
+    }
+
+    pub fn add_version_info(&mut self, new_version: String, changes: String) -> Result<(), PdfError> {
+        let ctx_manager = TemplateContextManager::new()?;
+        
+        let version_info = VersionInfo {
+            version: new_version.clone(),
+            modified_by: ctx_manager.get_user_login(),
+            modified_at: ctx_manager.get_current_time(),
+            changes,
+        };
+
+        if let Some(metadata) = self.metadata.get_mut("version_history") {
+            let mut history: Vec<VersionInfo> = serde_json::from_str(metadata)
+                .map_err(|e| PdfError::SerializationError(e.to_string()))?;
+            history.push(version_info);
+            *metadata = serde_json::to_string(&history)
+                .map_err(|e| PdfError::SerializationError(e.to_string()))?;
+        } else {
+            let history = vec![version_info];
+            self.metadata.insert(
+                "version_history".to_string(),
+                serde_json::to_string(&history)
+                    .map_err(|e| PdfError::SerializationError(e.to_string()))?
+            );
+        }
+
+        self.version = new_version;
+        self.update_metadata()?;
+        Ok(())
+    }
+}
+
+// Add context-aware template manager
+pub struct ContextualTemplateManager {
+    manager: TemplateManager,
+    context_manager: TemplateContextManager,
+}
+
+impl ContextualTemplateManager {
+    pub fn new() -> Result<Self, PdfError> {
+        Ok(ContextualTemplateManager {
+            manager: TemplateManager::new(),
+            context_manager: TemplateContextManager::new()?,
+        })
+    }
+
+    pub fn create_template(&mut self, name: String) -> Result<Uuid, PdfError> {
+        let template = PdfTemplate::new_with_context(name)?;
+        let id = template.id().clone();
+        self.manager.add_template(template);
+        Ok(id)
+    }
+
+    pub fn modify_template(&mut self, id: &Uuid, modifier: impl FnOnce(&mut PdfTemplate) -> Result<(), PdfError>) -> Result<(), PdfError> {
+        if let Some(template) = self.manager.get_template_mut(id) {
+            modifier(template)?;
+            template.update_metadata()?;
+        }
+        Ok(())
+    }
+
+    pub fn get_template_info(&self, id: &Uuid) -> Result<String, PdfError> {
+        if let Some(template) = self.manager.get_template(id) {
+            Ok(format!(
+                "Template: {}\nVersion: {}\nCreated by: {} at {}\nLast modified by: {} at {}\n",
+                template.name(),
+                template.version(),
+                template.author,
+                template.created_at.format("%Y-%m-%d %H:%M:%S"),
+                template.metadata.get("last_modified_by").unwrap_or(&template.author),
+                template.updated_at.format("%Y-%m-%d %H:%M:%S")
+            ))
+        } else {
+            Err(PdfError::TemplateNotFound(id.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_template_with_context() -> Result<(), PdfError> {
+        let template = PdfTemplate::new_with_context("Test Template".to_string())?;
+        assert_eq!(template.author, "kartik6717");
+        assert_eq!(template.created_at.format("%Y-%m-%d %H:%M:%S").to_string(), "2025-05-31 17:10:18");
+        Ok(())
+    }
+
+    #[test]
+    fn test_contextual_template_manager() -> Result<(), PdfError> {
+        let mut manager = ContextualTemplateManager::new()?;
+        let template_id = manager.create_template("Test Template".to_string())?;
+        
+        manager.modify_template(&template_id, |template| {
+            template.add_metadata("key".to_string(), "value".to_string());
+            Ok(())
+        })?;
+        
+        let info = manager.get_template_info(&template_id)?;
+        assert!(info.contains("kartik6717"));
+        assert!(info.contains("2025-05-31 17:10:18"));
+        Ok(())
+    }
+}
