@@ -1,75 +1,120 @@
 // Auto-patched by Alloma
-// Timestamp: 2025-06-01 15:54:26
-// User: kartik6717
-
-// Auto-implemented by Alloma Placeholder Patcher
-// Timestamp: 2025-06-01 15:02:33
-// User: kartik6717
-// Note: Placeholder code has been replaced with actual implementations
+// Timestamp: 2025-06-02 00:10:07
+// User: kartik4091
 
 #![allow(warnings)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::core::error::PdfError;
 
-#[derive(Debug)]
 pub struct MemoryUtils {
+    pools: Arc<RwLock<HashMap<String, MemoryPool>>>,
     config: MemoryConfig,
-    state: Arc<RwLock<MemoryState>>,
-    allocator: Box<dyn MemoryAllocator>,
+}
+
+#[derive(Debug)]
+pub struct MemoryPool {
+    capacity: usize,
+    used: usize,
+    blocks: Vec<MemoryBlock>,
+}
+
+#[derive(Debug)]
+pub struct MemoryBlock {
+    size: usize,
+    data: Vec<u8>,
+    in_use: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    pub pool_size: usize,
+    pub block_size: usize,
+    pub max_pools: usize,
 }
 
 impl MemoryUtils {
     pub fn new() -> Self {
         MemoryUtils {
-            config: MemoryConfig::default(),
-            state: Arc::new(RwLock::new(MemoryState::default())),
-            allocator: Box::new(CustomAllocator::new()),
+            pools: Arc::new(RwLock::new(HashMap::new())),
+            config: MemoryConfig {
+                pool_size: 1024 * 1024, // 1MB
+                block_size: 4096,        // 4KB
+                max_pools: 10,
+            },
         }
     }
 
-    // Memory Management
-    pub async fn allocate(&mut self, size: usize) -> Result<MemoryBlock, PdfError> {
-        // Check memory limits
-        self.check_memory_limits(size).await?;
+    pub async fn allocate(&mut self, size: usize) -> Result<Vec<u8>, PdfError> {
+        let pool_name = self.get_suitable_pool(size).await?;
+        let mut pools = self.pools.write().await;
         
-        // Allocate memory
-        let block = self.allocator.allocate(size)?;
-        
-        // Track allocation
-        self.track_allocation(&block).await?;
-        
-        Ok(block)
+        if let Some(pool) = pools.get_mut(&pool_name) {
+            self.allocate_from_pool(pool, size)
+        } else {
+            let mut pool = self.create_pool(size)?;
+            let data = self.allocate_from_pool(&mut pool, size)?;
+            pools.insert(pool_name, pool);
+            Ok(data)
+        }
     }
 
-    // Memory Monitoring
-    pub async fn monitor_usage(&self) -> Result<MemoryUsage, PdfError> {
-        let state = self.state.read().await;
+    pub async fn deallocate(&mut self, data: Vec<u8>) -> Result<(), PdfError> {
+        let mut pools = self.pools.write().await;
         
-        Ok(MemoryUsage {
-            allocated: state.total_allocated,
-            used: state.total_used,
-            free: state.total_free,
-            fragments: state.fragments.len(),
+        for pool in pools.values_mut() {
+            if self.deallocate_from_pool(pool, &data)? {
+                return Ok(());
+            }
+        }
+
+        Err(PdfError::InvalidObject("Memory block not found".into()))
+    }
+
+    async fn get_suitable_pool(&self, size: usize) -> Result<String, PdfError> {
+        let pools = self.pools.read().await;
+        
+        for (name, pool) in pools.iter() {
+            if pool.capacity - pool.used >= size {
+                return Ok(name.clone());
+            }
+        }
+
+        Ok(format!("pool_{}", pools.len()))
+    }
+
+    fn create_pool(&self, min_size: usize) -> Result<MemoryPool, PdfError> {
+        let capacity = std::cmp::max(min_size, self.config.pool_size);
+        
+        Ok(MemoryPool {
+            capacity,
+            used: 0,
+            blocks: Vec::new(),
         })
     }
 
-    // Memory Optimization
-    pub async fn optimize(&mut self) -> Result<OptimizationResult, PdfError> {
-        // Collect garbage
-        let collected = self.collect_garbage().await?;
-        
-        // Defragment memory
-        let defragmented = self.defragment().await?;
-        
-        // Compact allocations
-        let compacted = self.compact().await?;
-        
-        Ok(OptimizationResult {
-            collected,
-            defragmented,
-            compacted,
-        })
+    fn allocate_from_pool(&self, pool: &mut MemoryPool, size: usize) -> Result<Vec<u8>, PdfError> {
+        // Allocate memory from pool
+        todo!()
+    }
+
+    fn deallocate_from_pool(&self, pool: &mut MemoryPool, data: &[u8]) -> Result<bool, PdfError> {
+        // Deallocate memory from pool
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_allocation() {
+        let mut utils = MemoryUtils::new();
+        let data = utils.allocate(1024).await.unwrap();
+        assert_eq!(data.len(), 1024);
+        utils.deallocate(data).await.unwrap();
     }
 }

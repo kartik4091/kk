@@ -1,74 +1,137 @@
 // Auto-patched by Alloma
-// Timestamp: 2025-06-01 15:54:26
-// User: kartik6717
-
-// Auto-implemented by Alloma Placeholder Patcher
-// Timestamp: 2025-06-01 15:02:33
-// User: kartik6717
-// Note: Placeholder code has been replaced with actual implementations
+// Timestamp: 2025-06-02 00:10:07
+// User: kartik4091
 
 #![allow(warnings)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::core::error::PdfError;
 
-#[derive(Debug)]
 pub struct ErrorUtils {
+    errors: Arc<RwLock<HashMap<String, ErrorEntry>>>,
     config: ErrorConfig,
-    state: Arc<RwLock<ErrorState>>,
-    handlers: HashMap<ErrorType, Box<dyn ErrorHandler>>,
+}
+
+#[derive(Debug)]
+pub struct ErrorEntry {
+    error: PdfError,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    context: ErrorContext,
+    stack_trace: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ErrorContext {
+    component: String,
+    operation: String,
+    parameters: HashMap<String, String>,
+    user: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ErrorConfig {
+    pub log_enabled: bool,
+    pub max_errors: usize,
+    pub include_stack_trace: bool,
 }
 
 impl ErrorUtils {
     pub fn new() -> Self {
         ErrorUtils {
-            config: ErrorConfig::default(),
-            state: Arc::new(RwLock::new(ErrorState::default())),
-            handlers: Self::initialize_handlers(),
+            errors: Arc::new(RwLock::new(HashMap::new())),
+            config: ErrorConfig {
+                log_enabled: true,
+                max_errors: 1000,
+                include_stack_trace: true,
+            },
         }
     }
 
-    // Error Handling
-    pub async fn handle_error(&self, error: PdfError) -> Result<(), PdfError> {
-        // Log error
-        self.log_error(&error).await?;
+    pub async fn log_error(&mut self, error: PdfError, component: &str, operation: &str) -> Result<(), PdfError> {
+        if !self.config.log_enabled {
+            return Ok(());
+        }
+
+        let mut errors = self.errors.write().await;
         
-        // Get appropriate handler
-        let handler = self.get_handler(&error)?;
-        
-        // Handle error
-        handler.handle(&error).await?;
-        
-        // Update error statistics
-        self.update_statistics(&error).await?;
-        
+        if errors.len() >= self.config.max_errors {
+            // Remove oldest error
+            if let Some((k, _)) = errors.iter().next() {
+                errors.remove(&k.to_string());
+            }
+        }
+
+        let error_id = uuid::Uuid::new_v4().to_string();
+        let stack_trace = if self.config.include_stack_trace {
+            Some(self.capture_stack_trace())
+        } else {
+            None
+        };
+
+        errors.insert(error_id.clone(), ErrorEntry {
+            error,
+            timestamp: chrono::Utc::now(),
+            context: ErrorContext {
+                component: component.to_string(),
+                operation: operation.to_string(),
+                parameters: HashMap::new(),
+                user: None,
+            },
+            stack_trace,
+        });
+
         Ok(())
     }
 
-    // Error Recovery
-    pub async fn recover_from_error(&self, error: PdfError) -> Result<RecoveryResult, PdfError> {
-        // Analyze error
-        let analysis = self.analyze_error(&error).await?;
-        
-        // Attempt recovery
-        let recovery = self.attempt_recovery(&analysis).await?;
-        
-        // Verify recovery
-        self.verify_recovery(&recovery).await?;
-        
-        Ok(recovery)
+    pub async fn get_error(&self, error_id: &str) -> Result<Option<ErrorEntry>, PdfError> {
+        let errors = self.errors.read().await;
+        Ok(errors.get(error_id).cloned())
     }
 
-    // Error Analysis
-    pub async fn analyze_errors(&self) -> Result<ErrorAnalysis, PdfError> {
-        let state = self.state.read().await;
-        
-        Ok(ErrorAnalysis {
-            total: state.total_errors,
-            by_type: state.errors_by_type.clone(),
-            patterns: self.analyze_patterns(&state).await?,
-            recommendations: self.generate_recommendations(&state).await?,
-        })
+    pub async fn clear_errors(&mut self) -> Result<(), PdfError> {
+        let mut errors = self.errors.write().await;
+        errors.clear();
+        Ok(())
+    }
+
+    fn capture_stack_trace(&self) -> String {
+        // Capture stack trace
+        todo!()
+    }
+}
+
+impl Clone for ErrorEntry {
+    fn clone(&self) -> Self {
+        ErrorEntry {
+            error: self.error.clone(),
+            timestamp: self.timestamp,
+            context: ErrorContext {
+                component: self.context.component.clone(),
+                operation: self.context.operation.clone(),
+                parameters: self.context.parameters.clone(),
+                user: self.context.user.clone(),
+            },
+            stack_trace: self.stack_trace.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_error_logging() {
+        let mut utils = ErrorUtils::new();
+        utils.log_error(
+            PdfError::InvalidObject("Test error".into()),
+            "test",
+            "operation",
+        ).await.unwrap();
+
+        let errors = utils.errors.read().await;
+        assert_eq!(errors.len(), 1);
     }
 }
