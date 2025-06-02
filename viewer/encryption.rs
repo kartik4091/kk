@@ -1,67 +1,143 @@
 // Auto-patched by Alloma
-// Timestamp: 2025-06-01 15:54:26
-// User: kartik6717
-
-// Auto-implemented by Alloma Placeholder Patcher
-// Timestamp: 2025-06-01 15:02:33
-// User: kartik6717
-// Note: Placeholder code has been replaced with actual implementations
+// Timestamp: 2025-06-01 23:59:42
+// User: kartik4091
 
 #![allow(warnings)]
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::core::error::PdfError;
+use std::collections::HashMap;
+use crate::core::{error::PdfError, types::*};
 
-#[derive(Debug)]
 pub struct EncryptionInspector {
-    config: EncryptionConfig,
-    state: Arc<RwLock<EncryptionState>>,
-    analyzers: HashMap<String, Box<dyn EncryptionAnalyzer>>,
+    document: Document,
+    encryption_dict: Option<EncryptionDictionary>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EncryptionDictionary {
+    pub filter: String,
+    pub sub_filter: Option<String>,
+    pub version: i32,
+    pub revision: i32,
+    pub length: i32,
+    pub permissions: Permissions,
+    pub cf: Option<HashMap<String, CryptoFilter>>,
+    pub stmf: Option<String>,
+    pub strf: Option<String>,
+    pub eff: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Permissions {
+    pub print: bool,
+    pub modify: bool,
+    pub extract: bool,
+    pub annotations: bool,
+    pub fill_forms: bool,
+    pub extract_for_accessibility: bool,
+    pub assemble: bool,
+    pub print_high_quality: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CryptoFilter {
+    pub auth_event: String,
+    pub cf_m: String,
+    pub length: i32,
 }
 
 impl EncryptionInspector {
-    pub fn new() -> Self {
+    pub fn new(document: Document) -> Self {
         EncryptionInspector {
-            config: EncryptionConfig::default(),
-            state: Arc::new(RwLock::new(EncryptionState::default())),
-            analyzers: Self::initialize_analyzers(),
+            document,
+            encryption_dict: None,
         }
     }
 
-    pub async fn inspect(&self, document: &Document, data: InspectionData) -> Result<InspectionData, PdfError> {
-        let mut inspection_data = data;
+    pub async fn analyze(&mut self) -> Result<Option<EncryptionInfo>, PdfError> {
+        if !self.document.is_encrypted() {
+            return Ok(None);
+        }
 
-        // Detect encryption
-        inspection_data = self.detect_encryption(document, inspection_data).await?;
+        // Parse encryption dictionary
+        self.parse_encryption_dict().await?;
+        
+        // Analyze security handler
+        let security_handler = self.analyze_security_handler().await?;
+        
+        // Check permissions
+        let permissions = self.check_permissions().await?;
+        
+        // Analyze crypto filters
+        let crypto_filters = self.analyze_crypto_filters().await?;
 
-        // Analyze encryption methods
-        inspection_data = self.analyze_encryption_methods(document, inspection_data).await?;
-
-        // Analyze security handlers
-        inspection_data = self.analyze_security_handlers(document, inspection_data).await?;
-
-        // Analyze permissions
-        inspection_data = self.analyze_permissions(document, inspection_data).await?;
-
-        Ok(inspection_data)
+        Ok(Some(EncryptionInfo {
+            security_handler,
+            permissions,
+            crypto_filters,
+        }))
     }
 
-    async fn analyze_encryption_methods(&self, document: &Document, data: InspectionData) -> Result<InspectionData, PdfError> {
-        let mut inspection_data = data;
-
-        // Analyze standard security handler
-        inspection_data = self.analyze_standard_security(document, inspection_data).await?;
-
-        // Analyze public key security
-        inspection_data = self.analyze_public_key_security(document, inspection_data).await?;
-
-        // Analyze custom security handlers
-        inspection_data = self.analyze_custom_security(document, inspection_data).await?;
-
-        // Analyze encryption strength
-        inspection_data = self.analyze_encryption_strength(document, inspection_data).await?;
-
-        Ok(inspection_data)
+    pub async fn check_access(&self, permission: Permission) -> Result<bool, PdfError> {
+        if let Some(ref dict) = self.encryption_dict {
+            match permission {
+                Permission::Print => Ok(dict.permissions.print),
+                Permission::Modify => Ok(dict.permissions.modify),
+                Permission::Extract => Ok(dict.permissions.extract),
+                Permission::Annotations => Ok(dict.permissions.annotations),
+                Permission::FillForms => Ok(dict.permissions.fill_forms),
+                Permission::ExtractForAccessibility => Ok(dict.permissions.extract_for_accessibility),
+                Permission::Assemble => Ok(dict.permissions.assemble),
+                Permission::PrintHighQuality => Ok(dict.permissions.print_high_quality),
+            }
+        } else {
+            Ok(true) // No encryption = full access
+        }
     }
+
+    async fn parse_encryption_dict(&mut self) -> Result<(), PdfError> {
+        // Parse encryption dictionary
+        todo!()
+    }
+
+    async fn analyze_security_handler(&self) -> Result<SecurityHandler, PdfError> {
+        // Analyze security handler
+        todo!()
+    }
+
+    async fn check_permissions(&self) -> Result<Permissions, PdfError> {
+        // Check document permissions
+        todo!()
+    }
+
+    async fn analyze_crypto_filters(&self) -> Result<Vec<CryptoFilter>, PdfError> {
+        // Analyze crypto filters
+        todo!()
+    }
+}
+
+#[derive(Debug)]
+pub struct EncryptionInfo {
+    pub security_handler: SecurityHandler,
+    pub permissions: Permissions,
+    pub crypto_filters: Vec<CryptoFilter>,
+}
+
+#[derive(Debug)]
+pub enum Permission {
+    Print,
+    Modify,
+    Extract,
+    Annotations,
+    FillForms,
+    ExtractForAccessibility,
+    Assemble,
+    PrintHighQuality,
+}
+
+#[derive(Debug)]
+pub struct SecurityHandler {
+    pub name: String,
+    pub version: i32,
+    pub revision: i32,
+    pub key_length: i32,
 }

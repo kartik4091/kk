@@ -1,64 +1,128 @@
 // Auto-patched by Alloma
-// Timestamp: 2025-06-01 15:54:26
-// User: kartik6717
-
-// Auto-implemented by Alloma Placeholder Patcher
-// Timestamp: 2025-06-01 15:02:33
-// User: kartik6717
-// Note: Placeholder code has been replaced with actual implementations
+// Timestamp: 2025-06-02 00:05:36
+// User: kartik4091
 
 #![allow(warnings)]
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::core::error::PdfError;
+use std::collections::HashMap;
+use crate::core::{error::PdfError, types::*};
 
-#[derive(Debug)]
 pub struct OptionalContentInspector {
-    config: OptionalContentConfig,
-    state: Arc<RwLock<OptionalContentState>>,
-    analyzers: HashMap<String, Box<dyn OptionalContentAnalyzer>>,
+    document: Document,
+    groups: HashMap<ObjectId, OCGroup>,
+    configurations: Vec<OCConfiguration>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OCGroup {
+    name: String,
+    intent: Vec<String>,
+    usage: OCUsage,
+    state: OCState,
+    elements: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OCConfiguration {
+    name: String,
+    creator: Option<String>,
+    base_state: OCState,
+    on: Vec<ObjectId>,
+    off: Vec<ObjectId>,
+    order: Option<Vec<ObjectId>>,
+    locked: Vec<ObjectId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OCUsage {
+    view: Option<ViewUsage>,
+    print: Option<PrintUsage>,
+    export: Option<ExportUsage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewUsage {
+    zoom_min: Option<f32>,
+    zoom_max: Option<f32>,
+    view_state: Option<OCState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrintUsage {
+    subtype: Option<String>,
+    print_state: Option<OCState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportUsage {
+    export_state: Option<OCState>,
+}
+
+#[derive(Debug, Clone)]
+pub enum OCState {
+    ON,
+    OFF,
+    Unchanged,
 }
 
 impl OptionalContentInspector {
-    pub async fn inspect(&self, document: &Document) -> Result<OptionalContentAnalysis, PdfError> {
-        // Analyze OCG groups
-        let groups = self.analyze_ocg_groups(document).await?;
+    pub fn new(document: Document) -> Self {
+        OptionalContentInspector {
+            document,
+            groups: HashMap::new(),
+            configurations: Vec::new(),
+        }
+    }
 
-        // Analyze OCMD
-        let ocmd = self.analyze_ocmd(document).await?;
+    pub async fn analyze(&mut self) -> Result<(Vec<OCGroup>, Vec<OCConfiguration>), PdfError> {
+        // Extract OC groups
+        self.extract_groups().await?;
+        
+        // Extract configurations
+        self.extract_configurations().await?;
+        
+        // Process relationships
+        self.process_relationships().await?;
+        
+        // Validate configurations
+        self.validate_configurations().await?;
 
-        // Analyze usage contexts
-        let usage = self.analyze_usage_contexts(document).await?;
+        Ok((
+            self.groups.values().cloned().collect(),
+            self.configurations.clone(),
+        ))
+    }
 
-        // Analyze locked content
-        let locked = self.analyze_locked_content(document).await?;
+    pub async fn get_group(&self, id: &ObjectId) -> Option<&OCGroup> {
+        self.groups.get(id)
+    }
 
-        // Analyze visibility expressions
-        let visibility = self.analyze_visibility_expressions(document).await?;
+    pub async fn set_group_state(&mut self, id: &ObjectId, state: OCState) -> Result<(), PdfError> {
+        if let Some(group) = self.groups.get_mut(id) {
+            group.state = state;
+            Ok(())
+        } else {
+            Err(PdfError::InvalidObject("Optional content group not found".into()))
+        }
+    }
 
-        // Analyze layer configurations
-        let configurations = self.analyze_layer_configurations(document).await?;
+    async fn extract_groups(&mut self) -> Result<(), PdfError> {
+        // Extract optional content groups
+        todo!()
+    }
 
-        // Analyze intent
-        let intent = self.analyze_intent(document).await?;
+    async fn extract_configurations(&mut self) -> Result<(), PdfError> {
+        // Extract optional content configurations
+        todo!()
+    }
 
-        // Analyze order
-        let order = self.analyze_order(document).await?;
+    async fn process_relationships(&mut self) -> Result<(), PdfError> {
+        // Process group relationships
+        todo!()
+    }
 
-        // Analyze AS array
-        let as_array = self.analyze_as_array(document).await?;
-
-        Ok(OptionalContentAnalysis {
-            groups,
-            ocmd,
-            usage,
-            locked,
-            visibility,
-            configurations,
-            intent,
-            order,
-            as_array,
-        })
+    async fn validate_configurations(&self) -> Result<(), PdfError> {
+        // Validate configurations
+        todo!()
     }
 }

@@ -1,68 +1,96 @@
 // Auto-patched by Alloma
-// Timestamp: 2025-06-01 15:54:26
-// User: kartik6717
-
-// Auto-implemented by Alloma Placeholder Patcher
-// Timestamp: 2025-06-01 15:02:33
-// User: kartik6717
-// Note: Placeholder code has been replaced with actual implementations
+// Timestamp: 2025-06-02 00:03:34
+// User: kartik4091
 
 #![allow(warnings)]
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::core::error::PdfError;
+use std::collections::HashMap;
+use crate::core::{error::PdfError, types::*};
 
-#[derive(Debug)]
 pub struct JavaScriptInspector {
-    config: JavaScriptConfig,
-    state: Arc<RwLock<JavaScriptState>>,
-    analyzers: HashMap<String, Box<dyn JavaScriptAnalyzer>>,
+    document: Document,
+    scripts: HashMap<String, JavaScript>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JavaScript {
+    name: String,
+    code: String,
+    location: ScriptLocation,
+    trigger: ScriptTrigger,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScriptLocation {
+    DocumentLevel,
+    Page(u32),
+    Field(String),
+    Annotation(ObjectId),
+}
+
+#[derive(Debug, Clone)]
+pub enum ScriptTrigger {
+    Open,
+    Close,
+    Before,
+    After,
+    MouseUp,
+    MouseDown,
+    MouseEnter,
+    MouseExit,
+    Focus,
+    Blur,
+    KeyPress,
+    Format,
+    Validate,
+    Calculate,
 }
 
 impl JavaScriptInspector {
-    pub async fn inspect(&self, document: &Document) -> Result<JavaScriptAnalysis, PdfError> {
-        // Analyze document-level JavaScript
-        let doc_scripts = self.analyze_document_scripts(document).await?;
+    pub fn new(document: Document) -> Self {
+        JavaScriptInspector {
+            document,
+            scripts: HashMap::new(),
+        }
+    }
 
-        // Analyze form field scripts
-        let form_scripts = self.analyze_form_scripts(document).await?;
+    pub async fn analyze(&mut self) -> Result<Vec<JavaScript>, PdfError> {
+        // Extract document level scripts
+        self.extract_document_scripts().await?;
+        
+        // Extract page level scripts
+        self.extract_page_scripts().await?;
+        
+        // Extract form field scripts
+        self.extract_field_scripts().await?;
+        
+        // Extract annotation scripts
+        self.extract_annotation_scripts().await?;
 
-        // Analyze action scripts
-        let action_scripts = self.analyze_action_scripts(document).await?;
+        Ok(self.scripts.values().cloned().collect())
+    }
 
-        // Analyze calculation scripts
-        let calc_scripts = self.analyze_calculation_scripts(document).await?;
+    pub async fn get_script(&self, name: &str) -> Option<&JavaScript> {
+        self.scripts.get(name)
+    }
 
-        // Analyze validation scripts
-        let validation_scripts = self.analyze_validation_scripts(document).await?;
+    async fn extract_document_scripts(&mut self) -> Result<(), PdfError> {
+        // Extract document level JavaScript
+        todo!()
+    }
 
-        // Analyze format scripts
-        let format_scripts = self.analyze_format_scripts(document).await?;
+    async fn extract_page_scripts(&mut self) -> Result<(), PdfError> {
+        // Extract page level JavaScript
+        todo!()
+    }
 
-        // Analyze keystroke scripts
-        let keystroke_scripts = self.analyze_keystroke_scripts(document).await?;
+    async fn extract_field_scripts(&mut self) -> Result<(), PdfError> {
+        // Extract form field JavaScript
+        todo!()
+    }
 
-        // Perform security analysis
-        let security_analysis = self.analyze_script_security(
-            &doc_scripts,
-            &form_scripts,
-            &action_scripts,
-            &calc_scripts,
-            &validation_scripts,
-            &format_scripts,
-            &keystroke_scripts,
-        ).await?;
-
-        Ok(JavaScriptAnalysis {
-            document_scripts: doc_scripts,
-            form_scripts,
-            action_scripts,
-            calculation_scripts: calc_scripts,
-            validation_scripts,
-            format_scripts,
-            keystroke_scripts,
-            security_analysis,
-        })
+    async fn extract_annotation_scripts(&mut self) -> Result<(), PdfError> {
+        // Extract annotation JavaScript
+        todo!()
     }
 }
