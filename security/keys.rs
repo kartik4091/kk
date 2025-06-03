@@ -1,75 +1,287 @@
-// Auto-patched by Alloma
-// Timestamp: 2025-06-01 15:54:26
-// User: kartik6717
+use crate::{PdfError, SecurityConfig};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use uuid::Uuid;
 
-// Auto-implemented by Alloma Placeholder Patcher
-// Timestamp: 2025-06-01 15:02:33
-// User: kartik6717
-// Note: Placeholder code has been replaced with actual implementations
-
-#![allow(warnings)]
-
-use ring::aead::{OpeningKey, SealingKey, CHACHA20_POLY1305};
-use serde::{Serialize, Deserialize};
-use crate::core::error::PdfError;
-
-#[derive(Debug)]
-pub struct KeyManager {
-    config: KeyManagementConfig,
-    keys: HashMap<String, CryptoKey>,
+pub struct KeyManagementSystem {
+    state: Arc<RwLock<KeyState>>,
+    config: KeyConfig,
+    keys: Arc<RwLock<HashMap<String, Key>>>,
     rotation_schedule: KeyRotationSchedule,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyManagementConfig {
-    key_size: u32,
-    rotation_interval: Duration,
-    storage_method: KeyStorageMethod,
-    backup_policy: BackupPolicy,
+struct KeyState {
+    operations_performed: u64,
+    last_operation: Option<DateTime<Utc>>,
+    active_operations: u32,
+}
+
+#[derive(Clone)]
+struct KeyConfig {
+    min_key_length: usize,
+    key_algorithm: KeyAlgorithm,
+    rotation_interval: std::time::Duration,
+    max_key_age: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CryptoKey {
-    key_id: String,
+pub struct Key {
+    id: String,
     key_type: KeyType,
-    key_data: Vec<u8>,
-    created_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
+    algorithm: KeyAlgorithm,
+    material: KeyMaterial,
+    status: KeyStatus,
     metadata: KeyMetadata,
 }
 
-impl KeyManager {
-    pub fn new() -> Self {
-        KeyManager {
-            config: KeyManagementConfig::default(),
-            keys: HashMap::new(),
-            rotation_schedule: KeyRotationSchedule::default(),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum KeyType {
+    Master,
+    Document,
+    Signing,
+    Authentication,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KeyAlgorithm {
+    Aes256,
+    Rsa2048,
+    Rsa4096,
+    Ed25519,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KeyMaterial {
+    public_key: Option<String>,
+    encrypted_private_key: Option<String>,
+    symmetric_key: Option<String>,
+    initialization_vector: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum KeyStatus {
+    Active,
+    Inactive,
+    Compromised,
+    Expired,
+    PendingDeletion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KeyMetadata {
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    last_rotated: Option<DateTime<Utc>>,
+    created_by: String,
+    purpose: String,
+}
+
+struct KeyRotationSchedule {
+    last_rotation: DateTime<Utc>,
+    next_rotation: DateTime<Utc>,
+    interval: std::time::Duration,
+}
+
+impl KeyManagementSystem {
+    pub async fn new(security_config: &SecurityConfig) -> Result<Self, PdfError> {
+        let config = KeyConfig::default();
+        let current_time = Utc::parse_from_str("2025-06-02 18:33:55", "%Y-%m-%d %H:%M:%S")
+            .map_err(|_| PdfError::Security("Invalid current time".to_string()))?;
+
+        Ok(Self {
+            state: Arc::new(RwLock::new(KeyState {
+                operations_performed: 0,
+                last_operation: None,
+                active_operations: 0,
+            })),
+            config,
+            keys: Arc::new(RwLock::new(Self::initialize_keys(current_time)?)),
+            rotation_schedule: KeyRotationSchedule {
+                last_rotation: current_time,
+                next_rotation: current_time + chrono::Duration::days(1),
+                interval: std::time::Duration::from_secs(24 * 60 * 60),
+            },
+        })
+    }
+
+    fn initialize_keys(current_time: DateTime<Utc>) -> Result<HashMap<String, Key>, PdfError> {
+        let mut keys = HashMap::new();
+        
+        // Create master key
+        let master_key_id = Uuid::new_v4().to_string();
+        keys.insert(master_key_id.clone(), Key {
+            id: master_key_id,
+            key_type: KeyType::Master,
+            algorithm: KeyAlgorithm::Aes256,
+            material: KeyMaterial {
+                public_key: None,
+                encrypted_private_key: None,
+                symmetric_key: Some(base64::encode(rand::random::<[u8; 32]>())),
+                initialization_vector: Some(base64::encode(rand::random::<[u8; 16]>())),
+            },
+            status: KeyStatus::Active,
+            metadata: KeyMetadata {
+                created_at: current_time,
+                updated_at: current_time,
+                expires_at: current_time + chrono::Duration::days(90),
+                last_rotated: None,
+                created_by: "kartik4091".to_string(),
+                purpose: "Master encryption key".to_string(),
+            },
+        });
+
+        // Create signing key
+        let signing_key_id = Uuid::new_v4().to_string();
+        keys.insert(signing_key_id.clone(), Key {
+            id: signing_key_id,
+            key_type: KeyType::Signing,
+            algorithm: KeyAlgorithm::Ed25519,
+            material: KeyMaterial {
+                public_key: Some(base64::encode(rand::random::<[u8; 32]>())),
+                encrypted_private_key: Some(base64::encode(rand::random::<[u8; 64]>())),
+                symmetric_key: None,
+                initialization_vector: None,
+            },
+            status: KeyStatus::Active,
+            metadata: KeyMetadata {
+                created_at: current_time,
+                updated_at: current_time,
+                expires_at: current_time + chrono::Duration::days(365),
+                last_rotated: None,
+                created_by: "kartik4091".to_string(),
+                purpose: "Document signing".to_string(),
+            },
+        });
+
+        Ok(keys)
+    }
+
+    pub async fn get_key(&self, key_id: &str) -> Result<Key, PdfError> {
+        let keys = self.keys.read().map_err(|_| 
+            PdfError::Security("Failed to acquire keys lock".to_string()))?;
+        
+        keys.get(key_id)
+            .cloned()
+            .ok_or_else(|| PdfError::Security("Key not found".to_string()))
+    }
+
+    pub async fn create_key(
+        &self,
+        key_type: KeyType,
+        algorithm: KeyAlgorithm,
+    ) -> Result<Key, PdfError> {
+        let mut state = self.state.write().map_err(|_| 
+            PdfError::Security("Failed to acquire state lock".to_string()))?;
+        
+        let mut keys = self.keys.write().map_err(|_| 
+            PdfError::Security("Failed to acquire keys lock".to_string()))?;
+
+        let current_time = Utc::parse_from_str("2025-06-02 18:33:55", "%Y-%m-%d %H:%M:%S")
+            .map_err(|_| PdfError::Security("Invalid current time".to_string()))?;
+
+        let key = Key {
+            id: Uuid::new_v4().to_string(),
+            key_type,
+            algorithm,
+            material: self.generate_key_material(&algorithm)?,
+            status: KeyStatus::Active,
+            metadata: KeyMetadata {
+                created_at: current_time,
+                updated_at: current_time,
+                expires_at: current_time + chrono::Duration::days(365),
+                last_rotated: None,
+                created_by: "kartik4091".to_string(),
+                purpose: "Document encryption".to_string(),
+            },
+        };
+
+        state.operations_performed += 1;
+        state.last_operation = Some(current_time);
+
+        keys.insert(key.id.clone(), key.clone());
+        Ok(key)
+    }
+
+    fn generate_key_material(&self, algorithm: &KeyAlgorithm) -> Result<KeyMaterial, PdfError> {
+        match algorithm {
+            KeyAlgorithm::Aes256 => Ok(KeyMaterial {
+                public_key: None,
+                encrypted_private_key: None,
+                symmetric_key: Some(base64::encode(rand::random::<[u8; 32]>())),
+                initialization_vector: Some(base64::encode(rand::random::<[u8; 16]>())),
+            }),
+            KeyAlgorithm::Ed25519 | KeyAlgorithm::Rsa2048 | KeyAlgorithm::Rsa4096 => Ok(KeyMaterial {
+                public_key: Some(base64::encode(rand::random::<[u8; 32]>())),
+                encrypted_private_key: Some(base64::encode(rand::random::<[u8; 64]>())),
+                symmetric_key: None,
+                initialization_vector: None,
+            }),
         }
     }
 
-    pub async fn rotate_keys(&mut self, document: &mut Document) -> Result<(), PdfError> {
-        // Generate new keys
-        let new_keys = self.generate_new_keys()?;
+    pub async fn rotate_keys(&self) -> Result<(), PdfError> {
+        let current_time = Utc::parse_from_str("2025-06-02 18:33:55", "%Y-%m-%d %H:%M:%S")
+            .map_err(|_| PdfError::Security("Invalid current time".to_string()))?;
 
-        // Rotate document keys
-        self.rotate_document_keys(document, &new_keys).await?;
+        let mut keys = self.keys.write().map_err(|_| 
+            PdfError::Security("Failed to acquire keys lock".to_string()))?;
 
-        // Update key store
-        self.update_key_store(&new_keys).await?;
+        for key in keys.values_mut() {
+            if matches!(key.status, KeyStatus::Active) {
+                // Create new key material
+                let new_material = self.generate_key_material(&key.algorithm)?;
+                key.material = new_material;
+                key.metadata.last_rotated = Some(current_time);
+                key.metadata.updated_at = current_time;
+            }
+        }
 
         Ok(())
     }
+}
 
-    pub async fn verify_keys(&self, document: &Document) -> Result<KeyStatus, PdfError> {
-        // Verify all keys
-        let keys_valid = self.verify_all_keys(document).await?;
-        let rotation_valid = self.verify_rotation_schedule(document).await?;
-        let storage_valid = self.verify_key_storage(document).await?;
+impl Default for KeyConfig {
+    fn default() -> Self {
+        Self {
+            min_key_length: 256,
+            key_algorithm: KeyAlgorithm::Aes256,
+            rotation_interval: std::time::Duration::from_secs(24 * 60 * 60), // 24 hours
+            max_key_age: std::time::Duration::from_secs(90 * 24 * 60 * 60), // 90 days
+        }
+    }
+}
 
-        Ok(KeyStatus {
-            is_valid: keys_valid && rotation_valid && storage_valid,
-            timestamp: Utc::now(),
-            verification_details: self.generate_verification_details(),
-        })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_key_management_system_creation() {
+        let config = SecurityConfig::default();
+        let kms = KeyManagementSystem::new(&config).await;
+        assert!(kms.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_key_creation() {
+        let config = SecurityConfig::default();
+        let kms = KeyManagementSystem::new(&config).await.unwrap();
+        
+        let key = kms.create_key(KeyType::Document, KeyAlgorithm::Aes256).await;
+        assert!(key.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_key_rotation() {
+        let config = SecurityConfig::default();
+        let kms = KeyManagementSystem::new(&config).await.unwrap();
+        
+        let result = kms.rotate_keys().await;
+        assert!(result.is_ok());
     }
 }
