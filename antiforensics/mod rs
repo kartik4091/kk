@@ -1,4 +1,4 @@
-//! Antiforensics module for secure PDF document sanitization
+//! Antiforensics module for secure PDF document sanitization pdf
 //! This module provides comprehensive PDF document antiforensics capabilities
 //! including scanning, analysis, cleaning, and verification.
 
