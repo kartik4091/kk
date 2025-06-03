@@ -1,374 +1,330 @@
-//! Logging utilities for PDF antiforensics
+//! Logging Implementation
 //! Author: kartik4091
-//! Created: 2025-06-03 04:50:08 UTC
-//! This module provides logging capabilities with secure
-//! and privacy-focused logging mechanisms.
+//! Created: 2025-06-03 09:20:38 UTC
 
+use super::*;
 use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    path::PathBuf,
+    time::{Duration, Instant},
+    collections::{HashMap, VecDeque},
 };
-use tokio::sync::RwLock;
+use tokio::{
+    sync::{RwLock, broadcast},
+    fs::{self, File, OpenOptions},
+    io::AsyncWriteExt,
+};
+use tracing::{info, warn, error, debug, instrument};
 use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
-use thiserror::Error;
-use tracing::{
-    self,
-    Level,
-    Subscriber,
-    field::{Field, Visit},
-    span::{Attributes, Record},
-};
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{
-    self,
-    fmt::{self, time::UtcTime},
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    Layer,
-};
-
-/// Logging error types
-#[derive(Error, Debug)]
-pub enum LoggingError {
-    #[error("Failed to initialize logger: {0}")]
-    Initialization(String),
-    
-    #[error("Failed to write log: {0}")]
-    Write(String),
-    
-    #[error("Failed to rotate log: {0}")]
-    Rotation(String),
-    
-    #[error("Failed to flush log: {0}")]
-    Flush(String),
-    
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-/// Result type for logging operations
-pub type LoggingResult<T> = Result<T, LoggingError>;
 
 /// Logging configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log directory path
-    pub log_dir: PathBuf,
-    /// Maximum log file size in bytes
-    pub max_file_size: usize,
-    /// Maximum log history in days
-    pub max_history_days: u32,
-    /// Minimum log level
-    pub min_level: Level,
-    /// Whether to log to console
-    pub console_logging: bool,
-    /// Whether to use JSON format
-    pub json_format: bool,
-    /// Fields to redact
-    pub redact_fields: Vec<String>,
-    /// Custom log metadata
-    pub metadata: HashMap<String, String>,
+pub struct LogConfig {
+    /// Log file path
+    pub log_file: PathBuf,
+    /// Maximum log size
+    pub max_size: u64,
+    /// Maximum log files
+    pub max_files: usize,
+    /// Log rotation interval
+    pub rotation_interval: Duration,
+    /// Log level
+    pub level: LogLevel,
+    /// Enable console output
+    pub console_output: bool,
+    /// Enable timestamps
+    pub timestamps: bool,
+    /// Enable metrics
+    pub enable_metrics: bool,
 }
 
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            log_dir: PathBuf::from("logs"),
-            max_file_size: 10 * 1024 * 1024, // 10MB
-            max_history_days: 30,
-            min_level: Level::INFO,
-            console_logging: true,
-            json_format: false,
-            redact_fields: vec![
-                "password".to_string(),
-                "key".to_string(),
-                "token".to_string(),
-                "secret".to_string(),
-            ],
-            metadata: HashMap::new(),
-        }
-    }
+/// Log level
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
 }
 
-/// Secure logging implementation
-pub struct SecureLogger {
+/// Log entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    /// Timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Level
+    pub level: LogLevel,
+    /// Message
+    pub message: String,
+    /// Module
+    pub module: String,
+    /// File
+    pub file: String,
+    /// Line
+    pub line: u32,
+    /// Thread ID
+    pub thread_id: u64,
+    /// Additional fields
+    pub fields: HashMap<String, String>,
+}
+
+/// Logger statistics
+#[derive(Debug, Clone, Default)]
+pub struct LogStats {
+    /// Total entries
+    pub total_entries: u64,
+    /// Entries by level
+    pub entries_by_level: HashMap<LogLevel, u64>,
+    /// Current file size
+    pub current_size: u64,
+    /// Total files
+    pub total_files: usize,
+}
+
+pub struct Logger {
     /// Logger configuration
-    config: Arc<LoggingConfig>,
-    /// File appender
-    appender: Arc<RwLock<RollingFileAppender>>,
-    /// Runtime metrics
-    metrics: Arc<RwLock<LoggingMetrics>>,
+    config: Arc<LogConfig>,
+    /// Current log file
+    file: Arc<RwLock<Option<File>>>,
+    /// Log entry buffer
+    buffer: Arc<RwLock<VecDeque<LogEntry>>>,
+    /// Statistics
+    stats: Arc<RwLock<LogStats>>,
+    /// Log broadcast channel
+    broadcast_tx: broadcast::Sender<LogEntry>,
+    /// Metrics
+    metrics: Arc<Metrics>,
 }
 
-/// Logging metrics
-#[derive(Debug, Default)]
-struct LoggingMetrics {
-    /// Total log entries
-    total_entries: usize,
-    /// Error entries
-    error_entries: usize,
-    /// Warning entries
-    warning_entries: usize,
-    /// Total bytes written
-    bytes_written: usize,
-    /// Last rotation time
-    last_rotation: DateTime<Utc>,
-}
-
-/// Custom log formatter with redaction
-struct SecureFormatter {
-    /// Fields to redact
-    redact_fields: Vec<String>,
-    /// Whether to use JSON format
-    json_format: bool,
-}
-
-impl SecureLogger {
-    /// Creates a new secure logger instance
-    #[instrument(skip(config))]
-    pub async fn new(config: LoggingConfig) -> LoggingResult<Self> {
-        debug!("Initializing SecureLogger");
-
+impl Logger {
+    /// Creates a new logger instance
+    pub async fn new(config: LogConfig) -> Result<Self> {
         // Create log directory if it doesn't exist
-        tokio::fs::create_dir_all(&config.log_dir).await?;
+        if let Some(parent) = config.log_file.parent() {
+            fs::create_dir_all(parent).await?;
+        }
 
-        // Initialize file appender
-        let appender = RollingFileAppender::new(
-            Rotation::new(
-                config.log_dir.clone(),
-                "antiforensics",
-                ".log",
-                Some(Duration::from_secs(86400 * config.max_history_days as u64)),
-                Some(config.max_file_size),
-            ),
-        ).map_err(|e| LoggingError::Initialization(e.to_string()))?;
+        // Create broadcast channel
+        let (broadcast_tx, _) = broadcast::channel(1000);
 
         let logger = Self {
-            config: Arc::new(config.clone()),
-            appender: Arc::new(RwLock::new(appender)),
-            metrics: Arc::new(RwLock::new(LoggingMetrics::default())),
+            config: Arc::new(config),
+            file: Arc::new(RwLock::new(None)),
+            buffer: Arc::new(RwLock::new(VecDeque::new())),
+            stats: Arc::new(RwLock::new(LogStats::default())),
+            broadcast_tx,
+            metrics: Arc::new(Metrics::new()),
         };
 
-        // Initialize tracing subscriber
-        logger.initialize_subscriber()?;
+        // Initialize log file
+        logger.rotate_log().await?;
+
+        // Start rotation task
+        let logger_clone = logger.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(logger_clone.config.rotation_interval).await;
+                if let Err(e) = logger_clone.rotate_log().await {
+                    eprintln!("Log rotation error: {}", e);
+                }
+            }
+        });
 
         Ok(logger)
     }
 
-    /// Initializes the tracing subscriber
-    fn initialize_subscriber(&self) -> LoggingResult<()> {
-        let formatter = SecureFormatter {
-            redact_fields: self.config.redact_fields.clone(),
-            json_format: self.config.json_format,
-        };
-
-        let file_layer = fmt::Layer::new()
-            .with_writer(self.appender.clone())
-            .with_target(true)
-            .with_thread_ids(true)
-            .with_thread_names(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_timer(UtcTime::rfc_3339())
-            .with_formatter(formatter);
-
-        let subscriber = tracing_subscriber::registry()
-            .with(file_layer.with_filter(
-                tracing_subscriber::filter::LevelFilter::from_level(self.config.min_level)
-            ));
-
-        // Add console logging if enabled
-        if self.config.console_logging {
-            let console_layer = fmt::layer()
-                .with_target(true)
-                .with_thread_ids(true)
-                .with_timer(UtcTime::rfc_3339());
-
-            subscriber.with(console_layer).init();
-        } else {
-            subscriber.init();
+    /// Logs a message
+    #[instrument(skip(self))]
+    pub async fn log(&self, level: LogLevel, message: &str, module: &str, file: &str, line: u32) -> Result<()> {
+        if level as u8 > self.config.level as u8 {
+            return Ok(());
         }
 
-        Ok(())
-    }
-
-    /// Logs a message with metadata
-    #[instrument(skip(self, message, metadata), err(Display))]
-    pub async fn log(
-        &self,
-        level: Level,
-        message: &str,
-        metadata: Option<HashMap<String, String>>,
-    ) -> LoggingResult<()> {
-        let mut combined_metadata = self.config.metadata.clone();
-        if let Some(meta) = metadata {
-            combined_metadata.extend(meta);
-        }
-
-        // Create log event
-        let event = LogEvent {
+        let start = Instant::now();
+        let entry = LogEntry {
             timestamp: Utc::now(),
             level,
             message: message.to_string(),
-            metadata: combined_metadata,
-        };
-
-        // Update metrics
-        let mut metrics = self.metrics.write().await;
-        metrics.total_entries += 1;
-        match level {
-            Level::ERROR => metrics.error_entries += 1,
-            Level::WARN => metrics.warning_entries += 1,
-            _ => {}
-        }
-
-        // Write log entry
-        let entry = if self.config.json_format {
-            serde_json::to_string(&event)
-                .map_err(|e| LoggingError::Write(e.to_string()))?
-        } else {
-            format!(
-                "{} [{}] {} {}",
-                event.timestamp.to_rfc3339(),
-                event.level,
-                event.message,
-                self.format_metadata(&event.metadata)
-            )
-        };
-
-        metrics.bytes_written += entry.len();
-
-        // Check rotation
-        if metrics.bytes_written >= self.config.max_file_size {
-            self.rotate().await?;
-        }
-
-        Ok(())
-    }
-
-    /// Rotates the log file
-    #[instrument(skip(self), err(Display))]
-    async fn rotate(&self) -> LoggingResult<()> {
-        let mut appender = self.appender.write().await;
-        appender.rotate()
-            .map_err(|e| LoggingError::Rotation(e.to_string()))?;
-
-        let mut metrics = self.metrics.write().await;
-        metrics.bytes_written = 0;
-        metrics.last_rotation = Utc::now();
-
-        Ok(())
-    }
-
-    /// Formats metadata for text output
-    fn format_metadata(&self, metadata: &HashMap<String, String>) -> String {
-        metadata.iter()
-            .map(|(k, v)| {
-                if self.config.redact_fields.contains(k) {
-                    format!("{}=<REDACTED>", k)
-                } else {
-                    format!("{}={}", k, v)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Gets current logging metrics
-    pub async fn get_metrics(&self) -> LoggingResult<LoggingMetrics> {
-        Ok(self.metrics.read().await.clone())
-    }
-
-    /// Flushes the log buffer
-    #[instrument(skip(self), err(Display))]
-    pub async fn flush(&self) -> LoggingResult<()> {
-        self.appender.write().await
-            .flush()
-            .map_err(|e| LoggingError::Flush(e.to_string()))?;
-        Ok(())
-    }
-}
-
-/// Log event structure
-#[derive(Debug, Serialize)]
-struct LogEvent {
-    /// Event timestamp
-    timestamp: DateTime<Utc>,
-    /// Log level
-    level: Level,
-    /// Log message
-    message: String,
-    /// Event metadata
-    metadata: HashMap<String, String>,
-}
-
-impl fmt::FormatEvent<'_, '_> for SecureFormatter {
-    fn format_event(
-        &self,
-        ctx: &fmt::FmtContext<'_>,
-        writer: fmt::format::Writer<'_>,
-        event: &tracing::Event<'_>,
-    ) -> std::fmt::Result {
-        let mut visitor = JsonVisitor::new(self.redact_fields.clone());
-        event.record(&mut visitor);
-
-        if self.json_format {
-            // Format as JSON
-            let event_json = serde_json::json!({
-                "timestamp": Utc::now().to_rfc3339(),
-                "level": event.metadata().level().as_str(),
-                "target": event.metadata().target(),
-                "fields": visitor.fields,
-            });
-
-            writeln!(writer, "{}", event_json)
-        } else {
-            // Format as text
-            write!(
-                writer,
-                "{} [{}] {} {}",
-                Utc::now().to_rfc3339(),
-                event.metadata().level(),
-                event.metadata().target(),
-                self.format_fields(&visitor.fields)
-            )
-        }
-    }
-}
-
-/// JSON visitor for tracing events
-struct JsonVisitor {
-    fields: HashMap<String, serde_json::Value>,
-    redact_fields: Vec<String>,
-}
-
-impl JsonVisitor {
-    fn new(redact_fields: Vec<String>) -> Self {
-        Self {
+            module: module.to_string(),
+            file: file.to_string(),
+            line,
+            thread_id: std::thread::current().id().as_u64().unwrap_or(0),
             fields: HashMap::new(),
-            redact_fields,
+        };
+
+        // Add to buffer
+        let mut buffer = self.buffer.write().await;
+        buffer.push_back(entry.clone());
+
+        // Update statistics
+        let mut stats = self.stats.write().await;
+        stats.total_entries += 1;
+        *stats.entries_by_level.entry(level).or_insert(0) += 1;
+
+        // Write to file
+        if let Some(file) = self.file.write().await.as_mut() {
+            let log_line = self.format_entry(&entry);
+            file.write_all(log_line.as_bytes()).await?;
+            file.write_all(b"\n").await?;
+            stats.current_size += log_line.len() as u64 + 1;
+
+            // Check if rotation needed
+            if stats.current_size >= self.config.max_size {
+                drop(stats);
+                self.rotate_log().await?;
+            }
+        }
+
+        // Write to console if enabled
+        if self.config.console_output {
+            let formatted = self.format_entry(&entry);
+            match level {
+                LogLevel::Error => eprintln!("{}", formatted),
+                LogLevel::Warn => println!("\x1b[33m{}\x1b[0m", formatted),
+                LogLevel::Info => println!("{}", formatted),
+                LogLevel::Debug => println!("\x1b[36m{}\x1b[0m", formatted),
+                LogLevel::Trace => println!("\x1b[90m{}\x1b[0m", formatted),
+            }
+        }
+
+        // Broadcast entry
+        let _ = self.broadcast_tx.send(entry);
+
+        // Record metrics
+        if self.config.enable_metrics {
+            self.metrics.record_operation("log_write", start.elapsed()).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Rotates log file
+    #[instrument(skip(self))]
+    async fn rotate_log(&self) -> Result<()> {
+        let start = Instant::now();
+
+        // Close current file
+        let mut current_file = self.file.write().await;
+        *current_file = None;
+
+        // Rename existing log files
+        let base_path = self.config.log_file.with_extension("");
+        for i in (1..self.config.max_files).rev() {
+            let src = base_path.with_extension(format!("log.{}", i));
+            let dst = base_path.with_extension(format!("log.{}", i + 1));
+            if src.exists() {
+                fs::rename(&src, &dst).await?;
+            }
+        }
+
+        // Rename current log file
+        if self.config.log_file.exists() {
+            fs::rename(
+                &self.config.log_file,
+                base_path.with_extension("log.1"),
+            ).await?;
+        }
+
+        // Create new log file
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&self.config.log_file)
+            .await?;
+
+        *current_file = Some(file);
+
+        // Reset current size
+        let mut stats = self.stats.write().await;
+        stats.current_size = 0;
+
+        // Record metrics
+        if self.config.enable_metrics {
+            self.metrics.record_operation("log_rotation", start.elapsed()).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Formats a log entry
+    fn format_entry(&self, entry: &LogEntry) -> String {
+        let mut formatted = String::new();
+
+        if self.config.timestamps {
+            formatted.push_str(&format!("[{}] ", entry.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")));
+        }
+
+        formatted.push_str(&format!(
+            "{:<5} [{}:{}] {} - {}",
+            format!("{:?}", entry.level),
+            entry.file,
+            entry.line,
+            entry.module,
+            entry.message
+        ));
+
+        if !entry.fields.is_empty() {
+            formatted.push_str(" {");
+            for (k, v) in &entry.fields {
+                formatted.push_str(&format!(" {}={}", k, v));
+            }
+            formatted.push_str(" }");
+        }
+
+        formatted
+    }
+
+    /// Gets a log entry subscriber
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
+        self.broadcast_tx.subscribe()
+    }
+
+    /// Gets logger statistics
+    pub async fn get_stats(&self) -> LogStats {
+        self.stats.read().await.clone()
+    }
+
+    /// Flushes log buffer
+    pub async fn flush(&self) -> Result<()> {
+        let mut buffer = self.buffer.write().await;
+        if let Some(file) = self.file.write().await.as_mut() {
+            while let Some(entry) = buffer.pop_front() {
+                let log_line = self.format_entry(&entry);
+                file.write_all(log_line.as_bytes()).await?;
+                file.write_all(b"\n").await?;
+            }
+            file.flush().await?;
+        }
+        Ok(())
+    }
+}
+
+impl Clone for Logger {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            file: self.file.clone(),
+            buffer: self.buffer.clone(),
+            stats: self.stats.clone(),
+            broadcast_tx: self.broadcast_tx.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
 
-impl Visit for JsonVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        let value_str = format!("{:?}", value);
-        if self.redact_fields.contains(&field.name().to_string()) {
-            self.fields.insert(field.name().to_string(), "<REDACTED>".into());
-        } else {
-            self.fields.insert(field.name().to_string(), value_str.into());
-        }
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if self.redact_fields.contains(&field.name().to_string()) {
-            self.fields.insert(field.name().to_string(), "<REDACTED>".into());
-        } else {
-            self.fields.insert(field.name().to_string(), value.into());
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            log_file: PathBuf::from("logs/app.log"),
+            max_size: 10 * 1024 * 1024, // 10MB
+            max_files: 5,
+            rotation_interval: Duration::from_secs(3600), // 1 hour
+            level: LogLevel::Info,
+            console_output: true,
+            timestamps: true,
+            enable_metrics: true,
         }
     }
 }
@@ -376,92 +332,122 @@ impl Visit for JsonVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::test;
     use tempfile::tempdir;
 
-    #[test]
-    async fn test_logger_initialization() {
-        let dir = tempdir().unwrap();
-        let config = LoggingConfig {
-            log_dir: dir.path().to_path_buf(),
-            ..Default::default()
+    async fn create_test_logger() -> Logger {
+        let temp_dir = tempdir().unwrap();
+        let config = LogConfig {
+            log_file: temp_dir.path().join("test.log"),
+            max_size: 1024,
+            max_files: 3,
+            rotation_interval: Duration::from_millis(100),
+            ..LogConfig::default()
         };
-        
-        let logger = SecureLogger::new(config).await;
-        assert!(logger.is_ok());
+        Logger::new(config).await.unwrap()
     }
 
-    #[test]
+    #[tokio::test]
     async fn test_log_writing() {
-        let dir = tempdir().unwrap();
-        let config = LoggingConfig {
-            log_dir: dir.path().to_path_buf(),
-            ..Default::default()
-        };
+        let logger = create_test_logger().await;
         
-        let logger = SecureLogger::new(config).await.unwrap();
-        let result = logger.log(
-            Level::INFO,
-            "Test message",
-            Some(HashMap::from([("test".to_string(), "value".to_string())]))
-        ).await;
+        logger.log(LogLevel::Info, "Test message", "test", "test.rs", 1).await.unwrap();
         
-        assert!(result.is_ok());
+        let stats = logger.get_stats().await;
+        assert_eq!(stats.total_entries, 1);
+        assert_eq!(*stats.entries_by_level.get(&LogLevel::Info).unwrap(), 1);
     }
 
-    #[test]
-    async fn test_redaction() {
-        let dir = tempdir().unwrap();
-        let config = LoggingConfig {
-            log_dir: dir.path().to_path_buf(),
-            redact_fields: vec!["password".to_string()],
-            ..Default::default()
-        };
-        
-        let logger = SecureLogger::new(config).await.unwrap();
-        let mut metadata = HashMap::new();
-        metadata.insert("password".to_string(), "secret123".to_string());
-        
-        let result = logger.log(Level::INFO, "Test message", Some(metadata)).await;
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    async fn test_metrics() {
-        let dir = tempdir().unwrap();
-        let config = LoggingConfig {
-            log_dir: dir.path().to_path_buf(),
-            ..Default::default()
-        };
-        
-        let logger = SecureLogger::new(config).await.unwrap();
-        logger.log(Level::ERROR, "Error message", None).await.unwrap();
-        
-        let metrics = logger.get_metrics().await.unwrap();
-        assert_eq!(metrics.error_entries, 1);
-    }
-
-    #[test]
-    async fn test_rotation() {
-        let dir = tempdir().unwrap();
-        let config = LoggingConfig {
-            log_dir: dir.path().to_path_buf(),
-            max_file_size: 100,
-            ..Default::default()
-        };
-        
-        let logger = SecureLogger::new(config).await.unwrap();
+    #[tokio::test]
+    async fn test_log_rotation() {
+        let logger = create_test_logger().await;
         
         // Write enough logs to trigger rotation
-        for _ in 0..10 {
+        for i in 0..100 {
             logger.log(
-                Level::INFO,
-                "Test message with some length to trigger rotation",
-                None
+                LogLevel::Info,
+                &format!("Test message {}", i),
+                "test",
+                "test.rs",
+                1
             ).await.unwrap();
         }
         
-        let metrics = logger.get_metrics().await.unwrap();
-        assert!(metrics.last_rotation > DateTime::<Utc>::MIN);
+        // Wait for rotation
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        // Check that backup files exist
+        let base_path = logger.config.log_file.with_extension("");
+        assert!(base_path.with_extension("log.1").exists());
     }
-}
+
+    #[tokio::test]
+    async fn test_log_levels() {
+        let logger = create_test_logger().await;
+        
+        logger.log(LogLevel::Debug, "Debug message", "test", "test.rs", 1).await.unwrap();
+        logger.log(LogLevel::Info, "Info message", "test", "test.rs", 1).await.unwrap();
+        
+        let stats = logger.get_stats().await;
+        assert_eq!(*stats.entries_by_level.get(&LogLevel::Info).unwrap(), 1);
+        assert_eq!(*stats.entries_by_level.get(&LogLevel::Debug).unwrap_or(&0), 0);
+    }
+
+    #[tokio::test]
+    async fn test_log_subscription() {
+        let logger = create_test_logger().await;
+        let mut subscriber = logger.subscribe();
+        
+        logger.log(LogLevel::Info, "Test message", "test", "test.rs", 1).await.unwrap();
+        
+        let received = subscriber.recv().await.unwrap();
+        assert_eq!(received.message, "Test message");
+        assert_eq!(received.level, LogLevel::Info);
+    }
+
+    #[tokio::test]
+    async fn test_log_flush() {
+        let logger = create_test_logger().await;
+        
+        logger.log(LogLevel::Info, "Test message", "test", "test.rs", 1).await.unwrap();
+        logger.flush().await.unwrap();
+        
+        let content = fs::read_to_string(&logger.config.log_file).await.unwrap();
+        assert!(content.contains("Test message"));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_logging() {
+        let logger = create_test_logger().await;
+        let logger_clone = logger.clone();
+        
+        let handle1 = tokio::spawn(async move {
+            for i in 0..100 {
+                logger.log(
+                    LogLevel::Info,
+                    &format!("Message {}", i),
+                    "test1",
+                    "test.rs",
+                    1
+                ).await.unwrap();
+            }
+        });
+        
+        let handle2 = tokio::spawn(async move {
+            for i in 0..100 {
+                logger_clone.log(
+                    LogLevel::Info,
+                    &format!("Message {}", i),
+                    "test2",
+                    "test.rs",
+                    1
+                ).await.unwrap();
+            }
+        });
+        
+        handle1.await.unwrap();
+        handle2.await.unwrap();
+        
+        let stats = logger.get_stats().await;
+        assert_eq!(stats.total_entries, 200);
+    }
+    }
