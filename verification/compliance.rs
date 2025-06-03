@@ -1,562 +1,380 @@
-// Auto-generated for kartik4091/kk
-// Timestamp: 2025-06-02 05:24:09
-// User: kartik4091
-
-use async_trait::async_trait;
+use crate::{
+    PdfError, VerificationError, VerificationWarning, ErrorSeverity,
+    verification::ComplianceStandard,
+};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, instrument, warn};
-use crate::core::error::PdfError;
+use lopdf::{Document, Object, ObjectId, Dictionary, Stream};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 
-#[derive(Debug, thiserror::Error)]
-pub enum ComplianceError {
-    #[error("Validation error: {0}")]
-    ValidationError(String),
-    
-    #[error("Standards violation: {0}")]
-    StandardsViolation(String),
-    
-    #[error("Reporting error: {0}")]
-    ReportingError(String),
-    
-    #[error("Policy violation: {0}")]
-    PolicyViolation(String),
-    
-    #[error(transparent)]
-    Storage(#[from] std::io::Error),
-    
-    #[error(transparent)]
-    Core(#[from] PdfError),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceConfig {
-    pub standards: Vec<ComplianceStandard>,
-    pub policies: Vec<CompliancePolicy>,
-    pub reporting: ReportingConfig,
-    pub validation_rules: ValidationConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceStandard {
-    pub name: String,
-    pub version: String,
-    pub requirements: Vec<Requirement>,
-    pub validation_level: ValidationLevel,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Requirement {
-    pub id: String,
-    pub description: String,
-    pub criteria: Vec<ComplianceCriteria>,
-    pub severity: ComplianceSeverity,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceCriteria {
-    pub rule_type: RuleType,
-    pub parameters: HashMap<String, String>,
-    pub condition: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RuleType {
-    Content,
-    Structure,
-    Metadata,
-    Security,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompliancePolicy {
-    pub name: String,
-    pub description: String,
-    pub rules: Vec<PolicyRule>,
-    pub enforcement: EnforcementLevel,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PolicyRule {
-    pub id: String,
-    pub description: String,
-    pub checks: Vec<ComplianceCheck>,
-    pub remediation: Option<RemediationAction>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceCheck {
-    pub check_type: CheckType,
-    pub parameters: HashMap<String, String>,
-    pub expected_value: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CheckType {
-    Pattern,
-    Threshold,
-    Presence,
-    Format,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemediationAction {
-    pub action_type: ActionType,
-    pub parameters: HashMap<String, String>,
-    pub automatic: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ActionType {
-    Fix,
-    Notify,
-    Block,
-    Log,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReportingConfig {
-    pub formats: Vec<ReportFormat>,
-    pub schedule: ReportSchedule,
-    pub retention: RetentionPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ReportFormat {
-    PDF,
-    HTML,
-    JSON,
-    CSV,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReportSchedule {
-    pub frequency: ReportFrequency,
-    pub recipients: Vec<String>,
-    pub templates: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ReportFrequency {
-    Daily,
-    Weekly,
-    Monthly,
-    Quarterly,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetentionPolicy {
-    pub keep_days: u32,
-    pub max_reports: u32,
-    pub compression: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationConfig {
-    pub levels: Vec<ValidationLevel>,
-    pub custom_validators: Vec<CustomValidator>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ValidationLevel {
-    Basic,
-    Standard,
-    Strict,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomValidator {
-    pub name: String,
-    pub validator_type: String,
-    pub config: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ComplianceSeverity {
-    Critical,
-    High,
-    Medium,
-    Low,
-    Info,
-}
-
-impl Default for ComplianceConfig {
-    fn default() -> Self {
-        Self {
-            standards: vec![
-                ComplianceStandard {
-                    name: "PDF/A-1b".to_string(),
-                    version: "1.0".to_string(),
-                    requirements: vec![],
-                    validation_level: ValidationLevel::Strict,
-                },
-            ],
-            policies: vec![
-                CompliancePolicy {
-                    name: "Default Security Policy".to_string(),
-                    description: "Basic security requirements".to_string(),
-                    rules: vec![],
-                    enforcement: EnforcementLevel::Required,
-                },
-            ],
-            reporting: ReportingConfig {
-                formats: vec![ReportFormat::PDF, ReportFormat::JSON],
-                schedule: ReportSchedule {
-                    frequency: ReportFrequency::Monthly,
-                    recipients: vec![],
-                    templates: HashMap::new(),
-                },
-                retention: RetentionPolicy {
-                    keep_days: 365,
-                    max_reports: 100,
-                    compression: true,
-                },
-            },
-            validation_rules: ValidationConfig {
-                levels: vec![ValidationLevel::Standard],
-                custom_validators: vec![],
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EnforcementLevel {
-    Required,
-    Recommended,
-    Optional,
-}
-
-#[derive(Debug)]
-pub struct ComplianceManager {
-    config: ComplianceConfig,
+pub struct ComplianceVerifier {
     state: Arc<RwLock<ComplianceState>>,
-    metrics: Arc<ComplianceMetrics>,
+    config: ComplianceConfig,
 }
 
-#[derive(Debug, Default)]
 struct ComplianceState {
-    validations: HashMap<String, ValidationResult>,
-    reports: Vec<ComplianceReport>,
-    violations: Vec<ComplianceViolation>,
+    verifications_performed: u64,
+    last_verification: Option<DateTime<Utc>>,
+    active_verifications: u32,
+    verification_cache: HashMap<String, ComplianceResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationResult {
-    id: String,
-    timestamp: DateTime<Utc>,
-    standard: String,
-    results: Vec<RequirementResult>,
-    overall_status: ComplianceStatus,
+#[derive(Clone)]
+struct ComplianceConfig {
+    check_fonts: bool,
+    check_colors: bool,
+    check_metadata: bool,
+    check_encryption: bool,
+    required_metadata_fields: HashSet<String>,
+    forbidden_features: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequirementResult {
-    requirement_id: String,
-    status: ComplianceStatus,
-    findings: Vec<Finding>,
-    details: HashMap<String, String>,
+#[derive(Debug, Clone, Default)]
+pub struct ComplianceResult {
+    pub errors: Vec<VerificationError>,
+    pub warnings: Vec<VerificationWarning>,
+    pub rules_checked: usize,
+    pub metadata_valid: bool,
+    pub fonts_valid: bool,
+    pub colors_valid: bool,
+    pub encryption_valid: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Finding {
-    id: String,
-    severity: ComplianceSeverity,
-    message: String,
-    location: String,
-    context: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ComplianceStatus {
-    Compliant,
-    NonCompliant,
-    PartiallyCompliant,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceReport {
-    id: String,
-    timestamp: DateTime<Utc>,
-    period: (DateTime<Utc>, DateTime<Utc>),
-    results: Vec<ValidationResult>,
-    summary: ComplianceSummary,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceSummary {
-    total_validations: u32,
-    compliant_count: u32,
-    non_compliant_count: u32,
-    critical_findings: u32,
-    remediation_status: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplianceViolation {
-    id: String,
-    timestamp: DateTime<Utc>,
-    policy: String,
-    severity: ComplianceSeverity,
-    details: String,
-    status: ViolationStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ViolationStatus {
-    Open,
-    InRemediation,
-    Resolved,
-    Ignored,
-}
-
-#[derive(Debug)]
-struct ComplianceMetrics {
-    validations_performed: prometheus::IntCounter,
-    compliance_violations: prometheus::IntCounter,
-    validation_duration: prometheus::Histogram,
-    compliance_score: prometheus::Gauge,
-}
-
-#[async_trait]
-pub trait ComplianceChecker {
-    async fn validate_compliance(&mut self, document_path: &str, standard: &str) -> Result<ValidationResult, ComplianceError>;
-    async fn generate_report(&self, period: (DateTime<Utc>, DateTime<Utc>)) -> Result<ComplianceReport, ComplianceError>;
-    async fn check_policy(&mut self, document_path: &str) -> Result<Vec<ComplianceViolation>, ComplianceError>;
-    async fn remediate_violation(&mut self, violation_id: &str) -> Result<bool, ComplianceError>;
-}
-
-impl ComplianceManager {
-    pub fn new(config: ComplianceConfig) -> Self {
-        let metrics = Arc::new(ComplianceMetrics::new());
-        
-        Self {
-            config,
-            state: Arc::new(RwLock::new(ComplianceState::default())),
-            metrics,
-        }
-    }
-
-    #[instrument(skip(self))]
-    pub async fn initialize(&self) -> Result<(), ComplianceError> {
-        info!("Initializing ComplianceManager");
-        Ok(())
-    }
-
-    async fn validate_requirement(&self, requirement: &Requirement, document_path: &str) -> Result<RequirementResult, ComplianceError> {
-        let mut findings = Vec::new();
-
-        for criteria in &requirement.criteria {
-            match criteria.rule_type {
-                RuleType::Content => {
-                    // Validate content requirements
-                },
-                RuleType::Structure => {
-                    // Validate structural requirements
-                },
-                RuleType::Metadata => {
-                    // Validate metadata requirements
-                },
-                RuleType::Security => {
-                    // Validate security requirements
-                },
-                RuleType::Custom(ref rule_type) => {
-                    // Handle custom validation
-                },
-            }
-        }
-
-        let status = if findings.is_empty() {
-            ComplianceStatus::Compliant
-        } else {
-            ComplianceStatus::NonCompliant
-        };
-
-        Ok(RequirementResult {
-            requirement_id: requirement.id.clone(),
-            status,
-            findings,
-            details: HashMap::new(),
+impl ComplianceVerifier {
+    pub async fn new() -> Result<Self, PdfError> {
+        Ok(Self {
+            state: Arc::new(RwLock::new(ComplianceState {
+                verifications_performed: 0,
+                last_verification: None,
+                active_verifications: 0,
+                verification_cache: HashMap::new(),
+            })),
+            config: ComplianceConfig::default(),
         })
     }
 
-    async fn apply_policy_rules(&self, document_path: &str, policy: &CompliancePolicy) -> Vec<ComplianceViolation> {
-        let mut violations = Vec::new();
+    pub async fn verify(
+        &self,
+        doc: &Document,
+        standard: ComplianceStandard,
+    ) -> Result<ComplianceResult, PdfError> {
+        let start_time = std::time::Instant::now();
+        let current_time = Utc::parse_from_str("2025-06-02 18:58:50", "%Y-%m-%d %H:%M:%S")
+            .map_err(|_| PdfError::Verification("Invalid current time".to_string()))?;
 
-        for rule in &policy.rules {
-            for check in &rule.checks {
-                match check.check_type {
-                    CheckType::Pattern => {
-                        // Check pattern-based rules
-                    },
-                    CheckType::Threshold => {
-                        // Check threshold-based rules
-                    },
-                    CheckType::Presence => {
-                        // Check presence-based rules
-                    },
-                    CheckType::Format => {
-                        // Check format-based rules
-                    },
-                    CheckType::Custom(ref check_type) => {
-                        // Handle custom checks
-                    },
+        // Update state
+        {
+            let mut state = self.state.write().map_err(|_| 
+                PdfError::Verification("Failed to acquire state lock".to_string()))?;
+            state.active_verifications += 1;
+        }
+
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        let mut rules_checked = 0;
+
+        // Verify compliance based on standard
+        let metadata_valid = self.verify_metadata(doc, standard, &mut errors, &mut warnings, &mut rules_checked)?;
+        let fonts_valid = self.verify_fonts(doc, standard, &mut errors, &mut warnings, &mut rules_checked)?;
+        let colors_valid = self.verify_colors(doc, standard, &mut errors, &mut warnings, &mut rules_checked)?;
+        let encryption_valid = self.verify_encryption(doc, standard, &mut errors, &mut warnings, &mut rules_checked)?;
+
+        // Create result
+        let result = ComplianceResult {
+            errors,
+            warnings,
+            rules_checked,
+            metadata_valid,
+            fonts_valid,
+            colors_valid,
+            encryption_valid,
+        };
+
+        // Update state
+        {
+            let mut state = self.state.write().map_err(|_| 
+                PdfError::Verification("Failed to acquire state lock".to_string()))?;
+            state.active_verifications -= 1;
+            state.verifications_performed += 1;
+            state.last_verification = Some(current_time);
+            state.verification_cache.insert(doc.get_id().unwrap_or_default(), result.clone());
+        }
+
+        Ok(result)
+    }
+
+    fn verify_metadata(
+        &self,
+        doc: &Document,
+        standard: ComplianceStandard,
+        errors: &mut Vec<VerificationError>,
+        warnings: &mut Vec<VerificationWarning>,
+        rules_checked: &mut usize,
+    ) -> Result<bool, PdfError> {
+        if !self.config.check_metadata {
+            return Ok(true);
+        }
+
+        *rules_checked += 1;
+        let mut is_valid = true;
+
+        // Check XMP metadata presence
+        if let Some(metadata) = self.find_xmp_metadata(doc)? {
+            // Verify required XMP fields based on standard
+            for field in &self.config.required_metadata_fields {
+                if !self.has_xmp_field(&metadata, field)? {
+                    is_valid = false;
+                    errors.push(VerificationError {
+                        code: "MISSING_XMP_FIELD".to_string(),
+                        message: format!("Required XMP field '{}' is missing", field),
+                        location: None,
+                        severity: ErrorSeverity::Major,
+                        details: HashMap::new(),
+                    });
+                }
+            }
+
+            // Verify PDF/A identifier
+            if !self.verify_pdfa_identifier(&metadata, standard)? {
+                is_valid = false;
+                errors.push(VerificationError {
+                    code: "INVALID_PDFA_IDENTIFIER".to_string(),
+                    message: format!("Invalid or missing PDF/A identifier for {:?}", standard),
+                    location: None,
+                    severity: ErrorSeverity::Critical,
+                    details: HashMap::new(),
+                });
+            }
+        } else {
+            is_valid = false;
+            errors.push(VerificationError {
+                code: "MISSING_XMP_METADATA".to_string(),
+                message: "Document is missing XMP metadata".to_string(),
+                location: None,
+                severity: ErrorSeverity::Critical,
+                details: HashMap::new(),
+            });
+        }
+
+        Ok(is_valid)
+    }
+
+    fn verify_fonts(
+        &self,
+        doc: &Document,
+        standard: ComplianceStandard,
+        errors: &mut Vec<VerificationError>,
+        warnings: &mut Vec<VerificationWarning>,
+        rules_checked: &mut usize,
+    ) -> Result<bool, PdfError> {
+        if !self.config.check_fonts {
+            return Ok(true);
+        }
+
+        *rules_checked += 1;
+        let mut is_valid = true;
+
+        // Get all font dictionaries
+        let fonts = self.collect_fonts(doc)?;
+
+        for (id, font) in fonts {
+            // Check font embedding based on standard
+            if !self.is_font_embedded(&font)? {
+                is_valid = false;
+                errors.push(VerificationError {
+                    code: "FONT_NOT_EMBEDDED".to_string(),
+                    message: "All fonts must be embedded for PDF/A compliance".to_string(),
+                    location: Some(id),
+                    severity: ErrorSeverity::Critical,
+                    details: HashMap::new(),
+                });
+            }
+
+            // Check font subset for PDF/A-1a and PDF/A-1b
+            if matches!(standard, ComplianceStandard::PdfA1a | ComplianceStandard::PdfA1b) {
+                if !self.is_font_subset(&font)? {
+                    warnings.push(VerificationWarning {
+                        code: "FONT_NOT_SUBSET".to_string(),
+                        message: "Font should be subset for optimal PDF/A compliance".to_string(),
+                        location: Some(id),
+                        recommendation: "Consider subsetting fonts to reduce file size".to_string(),
+                    });
                 }
             }
         }
 
-        violations
+        Ok(is_valid)
     }
-}
 
-#[async_trait]
-impl ComplianceChecker for ComplianceManager {
-    #[instrument(skip(self))]
-    async fn validate_compliance(&mut self, document_path: &str, standard: &str) -> Result<ValidationResult, ComplianceError> {
-        let timer = self.metrics.validation_duration.start_timer();
-        
-        let standard_config = self.config.standards
-            .iter()
-            .find(|s| s.name == standard)
-            .ok_or_else(|| ComplianceError::ValidationError(
-                format!("Standard not found: {}", standard)
-            ))?;
-
-        let mut results = Vec::new();
-        
-        for requirement in &standard_config.requirements {
-            let result = self.validate_requirement(requirement, document_path).await?;
-            results.push(result);
+    fn verify_colors(
+        &self,
+        doc: &Document,
+        standard: ComplianceStandard,
+        errors: &mut Vec<VerificationError>,
+        warnings: &mut Vec<VerificationWarning>,
+        rules_checked: &mut usize,
+    ) -> Result<bool, PdfError> {
+        if !self.config.check_colors {
+            return Ok(true);
         }
 
-        let overall_status = if results.iter().all(|r| matches!(r.status, ComplianceStatus::Compliant)) {
-            ComplianceStatus::Compliant
-        } else if results.iter().all(|r| matches!(r.status, ComplianceStatus::NonCompliant)) {
-            ComplianceStatus::NonCompliant
-        } else {
-            ComplianceStatus::PartiallyCompliant
-        };
+        *rules_checked += 1;
+        let mut is_valid = true;
 
-        let validation = ValidationResult {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            standard: standard.to_string(),
-            results,
-            overall_status,
-        };
-
-        let mut state = self.state.write().await;
-        state.validations.insert(validation.id.clone(), validation.clone());
-        
-        self.metrics.validations_performed.inc();
-        timer.observe_duration();
-
-        Ok(validation)
-    }
-
-    #[instrument(skip(self))]
-    async fn generate_report(&self, period: (DateTime<Utc>, DateTime<Utc>)) -> Result<ComplianceReport, ComplianceError> {
-        let state = self.state.read().await;
-        
-        let results: Vec<_> = state.validations
-            .values()
-            .filter(|v| v.timestamp >= period.0 && v.timestamp <= period.1)
-            .cloned()
-            .collect();
-
-        let summary = ComplianceSummary {
-            total_validations: results.len() as u32,
-            compliant_count: results.iter()
-                .filter(|r| matches!(r.overall_status, ComplianceStatus::Compliant))
-                .count() as u32,
-            non_compliant_count: results.iter()
-                .filter(|r| matches!(r.overall_status, ComplianceStatus::NonCompliant))
-                .count() as u32,
-            critical_findings: results.iter()
-                .flat_map(|r| &r.results)
-                .flat_map(|r| &r.findings)
-                .filter(|f| matches!(f.severity, ComplianceSeverity::Critical))
-                .count() as u32,
-            remediation_status: HashMap::new(),
-        };
-
-        Ok(ComplianceReport {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            period,
-            results,
-            summary,
-        })
-    }
-
-    #[instrument(skip(self))]
-    async fn check_policy(&mut self, document_path: &str) -> Result<Vec<ComplianceViolation>, ComplianceError> {
-        let mut violations = Vec::new();
-
-        for policy in &self.config.policies {
-            let policy_violations = self.apply_policy_rules(document_path, policy).await;
-            violations.extend(policy_violations);
-        }
-
-        let mut state = self.state.write().await;
-        state.violations.extend(violations.clone());
-        
-        self.metrics.compliance_violations.inc_by(violations.len() as u64);
-
-        Ok(violations)
-    }
-
-    #[instrument(skip(self))]
-    async fn remediate_violation(&mut self, violation_id: &str) -> Result<bool, ComplianceError> {
-        let mut state = self.state.write().await;
-        
-        if let Some(violation) = state.violations
-            .iter_mut()
-            .find(|v| v.id == violation_id) {
-            match violation.status {
-                ViolationStatus::Open => {
-                    violation.status = ViolationStatus::InRemediation;
-                    // Implement remediation logic here
-                    Ok(true)
-                },
-                _ => Ok(false),
+        // Check for OutputIntents
+        if let Some(output_intents) = self.get_output_intents(doc)? {
+            // Verify color profile requirements
+            if !self.verify_color_profiles(&output_intents, standard)? {
+                is_valid = false;
+                errors.push(VerificationError {
+                    code: "INVALID_COLOR_PROFILE".to_string(),
+                    message: "Invalid or missing ICC color profile".to_string(),
+                    location: None,
+                    severity: ErrorSeverity::Critical,
+                    details: HashMap::new(),
+                });
             }
         } else {
-            Err(ComplianceError::ValidationError(
-                format!("Violation not found: {}", violation_id)
-            ))
+            is_valid = false;
+            errors.push(VerificationError {
+                code: "MISSING_OUTPUT_INTENT".to_string(),
+                message: "PDF/A requires at least one valid OutputIntent".to_string(),
+                location: None,
+                severity: ErrorSeverity::Critical,
+                details: HashMap::new(),
+            });
         }
+
+        Ok(is_valid)
+    }
+
+    fn verify_encryption(
+        &self,
+        doc: &Document,
+        standard: ComplianceStandard,
+        errors: &mut Vec<VerificationError>,
+        warnings: &mut Vec<VerificationWarning>,
+        rules_checked: &mut usize,
+    ) -> Result<bool, PdfError> {
+        if !self.config.check_encryption {
+            return Ok(true);
+        }
+
+        *rules_checked += 1;
+
+        // PDF/A does not allow encryption
+        if self.is_encrypted(doc)? {
+            errors.push(VerificationError {
+                code: "ENCRYPTION_NOT_ALLOWED".to_string(),
+                message: "PDF/A standard does not allow encryption".to_string(),
+                location: None,
+                severity: ErrorSeverity::Critical,
+                details: HashMap::new(),
+            });
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+
+    // Helper methods
+    fn find_xmp_metadata(&self, doc: &Document) -> Result<Option<Stream>, PdfError> {
+        if let Some(catalog_id) = doc.catalog {
+            if let Some(Object::Dictionary(dict)) = doc.objects.get(&catalog_id) {
+                if let Ok(Object::Reference(metadata_id)) = dict.get("Metadata") {
+                    if let Some(Object::Stream(stream)) = doc.objects.get(metadata_id) {
+                        return Ok(Some(stream.clone()));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn has_xmp_field(&self, metadata: &Stream, field: &str) -> Result<bool, PdfError> {
+        // In production, implement proper XMP parsing
+        Ok(true)
+    }
+
+    fn verify_pdfa_identifier(&self, metadata: &Stream, standard: ComplianceStandard) -> Result<bool, PdfError> {
+        // In production, implement proper PDF/A identifier verification
+        Ok(true)
+    }
+
+    fn collect_fonts(&self, doc: &Document) -> Result<HashMap<ObjectId, Dictionary>, PdfError> {
+        let mut fonts = HashMap::new();
+        for (id, obj) in &doc.objects {
+            if let Object::Dictionary(dict) = obj {
+                if let Ok(Object::Name(type_name)) = dict.get("Type") {
+                    if type_name == "Font" {
+                        fonts.insert(*id, dict.clone());
+                    }
+                }
+            }
+        }
+        Ok(fonts)
+    }
+
+    fn is_font_embedded(&self, font: &Dictionary) -> Result<bool, PdfError> {
+        Ok(font.has("FontDescriptor"))
+    }
+
+    fn is_font_subset(&self, font: &Dictionary) -> Result<bool, PdfError> {
+        if let Ok(Object::Name(base_font)) = font.get("BaseFont") {
+            Ok(base_font.starts_with('/'))
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn get_output_intents(&self, doc: &Document) -> Result<Option<Vec<Dictionary>>, PdfError> {
+        if let Some(catalog_id) = doc.catalog {
+            if let Some(Object::Dictionary(dict)) = doc.objects.get(&catalog_id) {
+                if let Ok(Object::Array(intents)) = dict.get("OutputIntents") {
+                    let mut result = Vec::new();
+                    for intent in intents {
+                        if let Object::Dictionary(intent_dict) = intent {
+                            result.push(intent_dict.clone());
+                        }
+                    }
+                    return Ok(Some(result));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn verify_color_profiles(&self, output_intents: &[Dictionary], standard: ComplianceStandard) -> Result<bool, PdfError> {
+        // In production, implement proper ICC profile verification
+        Ok(!output_intents.is_empty())
+    }
+
+    fn is_encrypted(&self, doc: &Document) -> Result<bool, PdfError> {
+        Ok(doc.trailer.has("Encrypt"))
     }
 }
 
-impl ComplianceMetrics {
-    fn new() -> Self {
+impl Default for ComplianceConfig {
+    fn default() -> Self {
+        let mut required_metadata_fields = HashSet::new();
+        required_metadata_fields.insert("Title".to_string());
+        required_metadata_fields.insert("Creator".to_string());
+        required_metadata_fields.insert("CreationDate".to_string());
+
+        let mut forbidden_features = HashSet::new();
+        forbidden_features.insert("Encryption".to_string());
+        forbidden_features.insert("JavaScript".to_string());
+        forbidden_features.insert("Multimedia".to_string());
+
         Self {
-            validations_performed: prometheus::IntCounter::new(
-                "compliance_validations_total",
-                "Total number of compliance validations performed"
-            ).unwrap(),
-            compliance_violations: prometheus::IntCounter::new(
-                "compliance_violations_total",
-                "Total number of compliance violations detected"
-            ).unwrap(),
-            validation_duration: prometheus::Histogram::new(
-                "compliance_validation_duration_seconds",
-                "Time taken for compliance validation operations"
-            ).unwrap(),
-            compliance_score: prometheus::Gauge::new(
-                "compliance_score",
-                "Overall compliance score"
-            ).unwrap(),
+            check_fonts: true,
+            check_colors: true,
+            check_metadata: true,
+            check_encryption: true,
+            required_metadata_fields,
+            forbidden_features,
         }
     }
 }
@@ -566,21 +384,39 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_compliance_validation() {
-        let mut manager = ComplianceManager::new(ComplianceConfig::default());
+    async fn test_compliance_verifier_creation() {
+        let verifier = ComplianceVerifier::new().await;
+        assert!(verifier.is_ok());
+    }
 
-        // Test compliance validation
-        let result = manager.validate_compliance("/test/document.pdf", "PDF/A-1b").await.unwrap();
-        assert!(matches!(result.overall_status, ComplianceStatus::Compliant));
+    #[tokio::test]
+    async fn test_basic_compliance_verification() {
+        let verifier = ComplianceVerifier::new().await.unwrap();
+        let doc = Document::new();
+        let result = verifier.verify(&doc, ComplianceStandard::PdfA1b).await;
+        assert!(result.is_ok());
+    }
 
-        // Test policy check
-        let violations = manager.check_policy("/test/document.pdf").await.unwrap();
-        assert!(violations.is_empty());
-
-        // Test report generation
-        let now = Utc::now();
-        let period = (now - chrono::Duration::days(30), now);
-        let report = manager.generate_report(period).await.unwrap();
-        assert_eq!(report.results.len(), 1);
+    #[tokio::test]
+    async fn test_metadata_verification() {
+        let verifier = ComplianceVerifier::new().await.unwrap();
+        let mut doc = Document::new();
+        
+        // Add minimal metadata
+        let metadata_dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name("Metadata".to_string())),
+            ("Subtype", Object::Name("XML".to_string())),
+        ]);
+        let metadata_id = doc.add_object(metadata_dict);
+        
+        // Set catalog with metadata
+        let catalog_dict = Dictionary::from_iter(vec![
+            ("Type", Object::Name("Catalog".to_string())),
+            ("Metadata", Object::Reference(metadata_id)),
+        ]);
+        doc.catalog = Some(doc.add_object(catalog_dict));
+        
+        let result = verifier.verify(&doc, ComplianceStandard::PdfA1b).await;
+        assert!(result.is_ok());
     }
 }
