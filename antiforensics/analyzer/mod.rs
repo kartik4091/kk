@@ -318,4 +318,4 @@ mod tests {
         assert!(config.max_concurrent_analyses > 0);
         assert!(config.cache_size_mb > 0);
     }
-          }
+            }
