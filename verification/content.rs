@@ -1,4 +1,4 @@
-use cte::{PdfError, VerificationError, VerificationWarning, ErrorSeverity};
+use crate::{PdfError, VerificationError, VerificationWarning, ErrorSeverity};
 use chrono::{DateTime, Utc};
 use lopdf::{Document, Object, ObjectId, Dictionary, Stream, Content};
 use std::{
