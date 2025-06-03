@@ -1,5 +1,4 @@
 //! Antiforensics module for secure PDF document sanitization
-//! Author: kartik4091
 //! Created: 2025-06-03 04:13:48 UTC
 //! This module provides comprehensive PDF document antiforensics capabilities
 //! including scanning, analysis, cleaning, and verification.
