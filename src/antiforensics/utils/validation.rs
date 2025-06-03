@@ -1,444 +1,456 @@
-//! Validation utilities for PDF antiforensics
+//! Validation Implementation
 //! Author: kartik4091
-//! Created: 2025-06-03 04:48:38 UTC
-//! This module provides validation functions for ensuring data
-//! integrity and security requirements.
+//! Created: 2025-06-03 09:19:16 UTC
 
+use super::*;
 use std::{
-    collections::HashMap,
-    path::Path,
-    time::Duration,
+    sync::Arc,
+    path::PathBuf,
+    time::{Duration, Instant},
+    collections::{HashMap, HashSet},
 };
+use tokio::sync::RwLock;
 use regex::Regex;
 use lazy_static::lazy_static;
-use serde::{Serialize, Deserialize};
-use thiserror::Error;
-use tracing::{info, warn, error, debug, trace, instrument};
-
-use super::crypto::CryptoUtils;
-use crate::antiforensics::{Document, PdfError};
-
-/// Validation error types
-#[derive(Error, Debug)]
-pub enum ValidationError {
-    #[error("Schema validation failed: {0}")]
-    Schema(String),
-
-    #[error("Content validation failed: {0}")]
-    Content(String),
-
-    #[error("Size validation failed: {0}")]
-    Size(String),
-
-    #[error("Format validation failed: {0}")]
-    Format(String),
-
-    #[error("Security validation failed: {0}")]
-    Security(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-/// Result type for validation operations
-pub type ValidationResult<T> = Result<T, ValidationError>;
 
 /// Validation configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationConfig {
-    /// Maximum file size in bytes
-    pub max_file_size: usize,
-    /// Maximum number of pages
-    pub max_pages: usize,
-    /// Maximum content size per page
-    pub max_page_size: usize,
-    /// Allowed file formats
-    pub allowed_formats: Vec<String>,
-    /// Required metadata fields
-    pub required_metadata: Vec<String>,
-    /// Content validation rules
-    pub content_rules: ContentRules,
-    /// Security validation rules
-    pub security_rules: SecurityRules,
+    /// Maximum string length
+    pub max_string_length: usize,
+    /// Maximum file size
+    pub max_file_size: u64,
+    /// Allowed file extensions
+    pub allowed_extensions: HashSet<String>,
+    /// Required fields
+    pub required_fields: HashSet<String>,
+    /// Custom patterns
+    pub patterns: HashMap<String, String>,
 }
 
-/// Content validation rules
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentRules {
-    /// Maximum image size
-    pub max_image_size: usize,
-    /// Allowed image formats
-    pub allowed_image_formats: Vec<String>,
-    /// Maximum text length
-    pub max_text_length: usize,
-    /// Banned keywords
-    pub banned_keywords: Vec<String>,
-    /// Content patterns to validate
-    pub content_patterns: HashMap<String, String>,
+/// Validation result
+#[derive(Debug, Clone)]
+pub struct ValidationResult {
+    /// Valid flag
+    pub is_valid: bool,
+    /// Validation errors
+    pub errors: Vec<ValidationError>,
+    /// Validation duration
+    pub duration: Duration,
 }
 
-/// Security validation rules
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityRules {
-    /// Minimum encryption key length
-    pub min_key_length: usize,
-    /// Required encryption algorithms
-    pub required_algorithms: Vec<String>,
-    /// Maximum permission level
-    pub max_permission_level: u32,
-    /// Required security handlers
-    pub required_handlers: Vec<String>,
+/// Validation error
+#[derive(Debug, Clone)]
+pub struct ValidationError {
+    /// Error code
+    pub code: String,
+    /// Error message
+    pub message: String,
+    /// Error field
+    pub field: Option<String>,
+}
+
+lazy_static! {
+    static ref EMAIL_REGEX: Regex = Regex::new(
+        r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
+    ).unwrap();
+
+    static ref URL_REGEX: Regex = Regex::new(
+        r"^https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&/=]*)$"
+    ).unwrap();
+
+    static ref PATH_REGEX: Regex = Regex::new(
+        r"^(?:/[^/]+)+/?$"
+    ).unwrap();
+}
+
+pub struct Validation {
+    /// Validation configuration
+    config: Arc<ValidationConfig>,
+    /// Custom validators
+    validators: Arc<RwLock<HashMap<String, Box<dyn Validator + Send + Sync>>>>,
+    /// Metrics
+    metrics: Arc<Metrics>,
+}
+
+/// Validator trait
+#[async_trait]
+pub trait Validator {
+    /// Validates a value
+    async fn validate(&self, value: &str) -> Result<()>;
+}
+
+impl Validation {
+    /// Creates a new validation instance
+    pub fn new(config: ValidationConfig) -> Self {
+        Self {
+            config: Arc::new(config),
+            validators: Arc::new(RwLock::new(HashMap::new())),
+            metrics: Arc::new(Metrics::new()),
+        }
+    }
+
+    /// Registers a custom validator
+    pub async fn register_validator<V>(&self, name: &str, validator: V) -> Result<()>
+    where
+        V: Validator + Send + Sync + 'static,
+    {
+        let mut validators = self.validators.write().await;
+        validators.insert(name.to_string(), Box::new(validator));
+        Ok(())
+    }
+
+    /// Validates a string value
+    #[instrument(skip(self))]
+    pub async fn validate_string(&self, value: &str) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        // Check length
+        if value.len() > self.config.max_string_length {
+            errors.push(ValidationError {
+                code: "LENGTH_EXCEEDED".into(),
+                message: format!("String length exceeds maximum of {}", self.config.max_string_length),
+                field: None,
+            });
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("string_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
+
+    /// Validates a file
+    #[instrument(skip(self))]
+    pub async fn validate_file(&self, path: &PathBuf) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        // Check if file exists
+        if !path.exists() {
+            errors.push(ValidationError {
+                code: "FILE_NOT_FOUND".into(),
+                message: format!("File not found: {}", path.display()),
+                field: None,
+            });
+            return ValidationResult {
+                is_valid: false,
+                errors,
+                duration: start.elapsed(),
+            };
+        }
+
+        // Check file size
+        if let Ok(metadata) = tokio::fs::metadata(path).await {
+            if metadata.len() > self.config.max_file_size {
+                errors.push(ValidationError {
+                    code: "SIZE_EXCEEDED".into(),
+                    message: format!("File size exceeds maximum of {} bytes", self.config.max_file_size),
+                    field: None,
+                });
+            }
+        }
+
+        // Check extension
+        if let Some(ext) = path.extension() {
+            if !self.config.allowed_extensions.contains(&ext.to_string_lossy().to_string()) {
+                errors.push(ValidationError {
+                    code: "INVALID_EXTENSION".into(),
+                    message: format!("File extension not allowed: {}", ext.to_string_lossy()),
+                    field: None,
+                });
+            }
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("file_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
+
+    /// Validates required fields
+    #[instrument(skip(self))]
+    pub async fn validate_required(&self, fields: &HashMap<String, String>) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        for required in &self.config.required_fields {
+            if !fields.contains_key(required) {
+                errors.push(ValidationError {
+                    code: "MISSING_FIELD".into(),
+                    message: format!("Required field missing: {}", required),
+                    field: Some(required.clone()),
+                });
+            }
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("required_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
+
+    /// Validates against a pattern
+    #[instrument(skip(self))]
+    pub async fn validate_pattern(&self, name: &str, value: &str) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        if let Some(pattern) = self.config.patterns.get(name) {
+            if let Ok(re) = Regex::new(pattern) {
+                if !re.is_match(value) {
+                    errors.push(ValidationError {
+                        code: "PATTERN_MISMATCH".into(),
+                        message: format!("Value does not match pattern: {}", name),
+                        field: None,
+                    });
+                }
+            }
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("pattern_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
+
+    /// Validates an email address
+    #[instrument(skip(self))]
+    pub async fn validate_email(&self, email: &str) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        if !EMAIL_REGEX.is_match(email) {
+            errors.push(ValidationError {
+                code: "INVALID_EMAIL".into(),
+                message: "Invalid email address format".into(),
+                field: None,
+            });
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("email_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
+
+    /// Validates a URL
+    #[instrument(skip(self))]
+    pub async fn validate_url(&self, url: &str) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        if !URL_REGEX.is_match(url) {
+            errors.push(ValidationError {
+                code: "INVALID_URL".into(),
+                message: "Invalid URL format".into(),
+                field: None,
+            });
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("url_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
+
+    /// Validates a file path
+    #[instrument(skip(self))]
+    pub async fn validate_path(&self, path: &str) -> ValidationResult {
+        let start = Instant::now();
+        let mut errors = Vec::new();
+
+        if !PATH_REGEX.is_match(path) {
+            errors.push(ValidationError {
+                code: "INVALID_PATH".into(),
+                message: "Invalid path format".into(),
+                field: None,
+            });
+        }
+
+        let result = ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            duration: start.elapsed(),
+        };
+
+        self.metrics.record_operation("path_validation", result.duration).await
+            .unwrap_or_else(|e| error!("Failed to record metrics: {}", e));
+
+        result
+    }
 }
 
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
-            max_file_size: 100 * 1024 * 1024, // 100MB
-            max_pages: 1000,
-            max_page_size: 10 * 1024 * 1024, // 10MB
-            allowed_formats: vec!["pdf".to_string()],
-            required_metadata: vec![
-                "Creator".to_string(),
-                "Producer".to_string(),
-                "CreationDate".to_string(),
-            ],
-            content_rules: ContentRules {
-                max_image_size: 5 * 1024 * 1024, // 5MB
-                allowed_image_formats: vec![
-                    "jpeg".to_string(),
-                    "png".to_string(),
-                    "tiff".to_string(),
-                ],
-                max_text_length: 1_000_000,
-                banned_keywords: vec![
-                    "javascript".to_string(),
-                    "eval".to_string(),
-                    "exec".to_string(),
-                ],
-                content_patterns: HashMap::new(),
-            },
-            security_rules: SecurityRules {
-                min_key_length: 256,
-                required_algorithms: vec![
-                    "AES-256".to_string(),
-                    "SHA-256".to_string(),
-                ],
-                max_permission_level: 3,
-                required_handlers: vec![
-                    "Standard".to_string(),
-                ],
-            },
+            max_string_length: 1024,
+            max_file_size: 10 * 1024 * 1024, // 10MB
+            allowed_extensions: ["txt", "pdf", "png", "jpg", "jpeg"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            required_fields: HashSet::new(),
+            patterns: HashMap::new(),
         }
-    }
-}
-
-lazy_static! {
-    static ref EMAIL_REGEX: Regex = Regex::new(
-        r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-    ).unwrap();
-    
-    static ref URL_REGEX: Regex = Regex::new(
-        r"^https?://[^\s/$.?#].[^\s]*$"
-    ).unwrap();
-    
-    static ref PHONE_REGEX: Regex = Regex::new(
-        r"^\+?[\d\s-]{10,}$"
-    ).unwrap();
-}
-
-/// Validation utilities implementation
-pub struct ValidationUtils {
-    /// Validation configuration
-    config: ValidationConfig,
-    /// Crypto utilities
-    crypto: CryptoUtils,
-}
-
-impl ValidationUtils {
-    /// Creates a new validation utilities instance
-    #[instrument(skip(config))]
-    pub fn new(config: ValidationConfig) -> Self {
-        debug!("Initializing ValidationUtils");
-        
-        Self {
-            crypto: CryptoUtils::new(Default::default()),
-            config,
-        }
-    }
-
-    /// Validates a PDF document
-    #[instrument(skip(self, doc), err(Display))]
-    pub async fn validate_document(&self, doc: &Document) -> ValidationResult<()> {
-        // Validate file size
-        self.validate_file_size(doc).await?;
-
-        // Validate page count and sizes
-        self.validate_pages(doc).await?;
-
-        // Validate metadata
-        self.validate_metadata(doc).await?;
-
-        // Validate content
-        self.validate_content(doc).await?;
-
-        // Validate security settings
-        self.validate_security(doc).await?;
-
-        Ok(())
-    }
-
-    /// Validates file size
-    #[instrument(skip(self, doc), err(Display))]
-    async fn validate_file_size(&self, doc: &Document) -> ValidationResult<()> {
-        let size = doc.get_size()?;
-        if size > self.config.max_file_size {
-            return Err(ValidationError::Size(format!(
-                "File size {} exceeds maximum allowed size {}",
-                size,
-                self.config.max_file_size
-            )));
-        }
-        Ok(())
-    }
-
-    /// Validates pages
-    #[instrument(skip(self, doc), err(Display))]
-    async fn validate_pages(&self, doc: &Document) -> ValidationResult<()> {
-        let page_count = doc.get_page_count()?;
-        if page_count > self.config.max_pages {
-            return Err(ValidationError::Content(format!(
-                "Page count {} exceeds maximum allowed pages {}",
-                page_count,
-                self.config.max_pages
-            )));
-        }
-
-        for page in doc.get_pages() {
-            let page_size = page.get_size()?;
-            if page_size > self.config.max_page_size {
-                return Err(ValidationError::Size(format!(
-                    "Page size {} exceeds maximum allowed page size {}",
-                    page_size,
-                    self.config.max_page_size
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Validates metadata
-    #[instrument(skip(self, doc), err(Display))]
-    async fn validate_metadata(&self, doc: &Document) -> ValidationResult<()> {
-        let metadata = doc.get_metadata()?;
-        for field in &self.config.required_metadata {
-            if !metadata.contains_key(field) {
-                return Err(ValidationError::Schema(format!(
-                    "Required metadata field {} is missing",
-                    field
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// Validates content
-    #[instrument(skip(self, doc), err(Display))]
-    async fn validate_content(&self, doc: &Document) -> ValidationResult<()> {
-        // Validate images
-        for image in doc.get_images()? {
-            let size = image.get_size()?;
-            if size > self.config.content_rules.max_image_size {
-                return Err(ValidationError::Content(format!(
-                    "Image size {} exceeds maximum allowed size {}",
-                    size,
-                    self.config.content_rules.max_image_size
-                )));
-            }
-
-            let format = image.get_format()?;
-            if !self.config.content_rules.allowed_image_formats.contains(&format) {
-                return Err(ValidationError::Format(format!(
-                    "Image format {} is not allowed",
-                    format
-                )));
-            }
-        }
-
-        // Validate text content
-        let text = doc.get_text_content()?;
-        if text.len() > self.config.content_rules.max_text_length {
-            return Err(ValidationError::Content(format!(
-                "Text length {} exceeds maximum allowed length {}",
-                text.len(),
-                self.config.content_rules.max_text_length
-            )));
-        }
-
-        // Check for banned keywords
-        for keyword in &self.config.content_rules.banned_keywords {
-            if text.to_lowercase().contains(&keyword.to_lowercase()) {
-                return Err(ValidationError::Content(format!(
-                    "Banned keyword {} found in content",
-                    keyword
-                )));
-            }
-        }
-
-        // Validate content patterns
-        for (name, pattern) in &self.config.content_rules.content_patterns {
-            let regex = Regex::new(pattern).map_err(|e| ValidationError::Content(e.to_string()))?;
-            if regex.is_match(&text) {
-                return Err(ValidationError::Content(format!(
-                    "Content matches forbidden pattern {}",
-                    name
-                )));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Validates security settings
-    #[instrument(skip(self, doc), err(Display))]
-    async fn validate_security(&self, doc: &Document) -> ValidationResult<()> {
-        let security = doc.get_security()?;
-
-        // Validate encryption
-        if let Some(encryption) = security.get_encryption()? {
-            if encryption.get_key_length()? < self.config.security_rules.min_key_length {
-                return Err(ValidationError::Security(format!(
-                    "Encryption key length {} is below minimum required length {}",
-                    encryption.get_key_length()?,
-                    self.config.security_rules.min_key_length
-                )));
-            }
-
-            let algorithm = encryption.get_algorithm()?;
-            if !self.config.security_rules.required_algorithms.contains(&algorithm) {
-                return Err(ValidationError::Security(format!(
-                    "Encryption algorithm {} is not allowed",
-                    algorithm
-                )));
-            }
-        }
-
-        // Validate permissions
-        let permissions = security.get_permissions()?;
-        if permissions > self.config.security_rules.max_permission_level {
-            return Err(ValidationError::Security(format!(
-                "Permission level {} exceeds maximum allowed level {}",
-                permissions,
-                self.config.security_rules.max_permission_level
-            )));
-        }
-
-        // Validate security handlers
-        let handler = security.get_handler()?;
-        if !self.config.security_rules.required_handlers.contains(&handler) {
-            return Err(ValidationError::Security(format!(
-                "Security handler {} is not allowed",
-                handler
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Validates an email address
-    #[instrument(skip(self))]
-    pub fn validate_email(&self, email: &str) -> bool {
-        EMAIL_REGEX.is_match(email)
-    }
-
-    /// Validates a URL
-    #[instrument(skip(self))]
-    pub fn validate_url(&self, url: &str) -> bool {
-        URL_REGEX.is_match(url)
-    }
-
-    /// Validates a phone number
-    #[instrument(skip(self))]
-    pub fn validate_phone(&self, phone: &str) -> bool {
-        PHONE_REGEX.is_match(phone)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::test;
 
-    #[test]
-    async fn test_file_size_validation() {
-        let config = ValidationConfig {
-            max_file_size: 1000,
-            ..Default::default()
-        };
-        let validator = ValidationUtils::new(config);
-        let mut doc = Document::new();
-        doc.set_content(&vec![0; 2000]);
+    #[tokio::test]
+    async fn test_string_validation() {
+        let validation = Validation::new(ValidationConfig {
+            max_string_length: 10,
+            ..ValidationConfig::default()
+        });
         
-        let result = validator.validate_file_size(&doc).await;
-        assert!(result.is_err());
+        let result = validation.validate_string("short").await;
+        assert!(result.is_valid);
+        
+        let result = validation.validate_string("very long string").await;
+        assert!(!result.is_valid);
     }
 
-    #[test]
-    async fn test_metadata_validation() {
-        let validator = ValidationUtils::new(ValidationConfig::default());
-        let mut doc = Document::new();
-        doc.set_metadata("Creator", "Test");
-        doc.set_metadata("Producer", "Test");
+    #[tokio::test]
+    async fn test_file_validation() {
+        let validation = Validation::new(ValidationConfig::default());
         
-        let result = validator.validate_metadata(&doc).await;
-        assert!(result.is_err());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let valid_path = temp_dir.path().join("test.txt");
+        tokio::fs::write(&valid_path, "test").await.unwrap();
+        
+        let result = validation.validate_file(&valid_path).await;
+        assert!(result.is_valid);
+        
+        let invalid_path = temp_dir.path().join("test.exe");
+        let result = validation.validate_file(&invalid_path).await;
+        assert!(!result.is_valid);
     }
 
-    #[test]
-    async fn test_content_validation() {
-        let config = ValidationConfig {
-            content_rules: ContentRules {
-                banned_keywords: vec!["javascript".to_string()],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let validator = ValidationUtils::new(config);
-        let mut doc = Document::new();
-        doc.set_text_content("This contains javascript code");
+    #[tokio::test]
+    async fn test_required_fields() {
+        let mut config = ValidationConfig::default();
+        config.required_fields.insert("name".into());
+        let validation = Validation::new(config);
         
-        let result = validator.validate_content(&doc).await;
-        assert!(result.is_err());
+        let mut fields = HashMap::new();
+        fields.insert("name".to_string(), "test".to_string());
+        
+        let result = validation.validate_required(&fields).await;
+        assert!(result.is_valid);
+        
+        fields.clear();
+        let result = validation.validate_required(&fields).await;
+        assert!(!result.is_valid);
     }
 
-    #[test]
-    async fn test_security_validation() {
-        let config = ValidationConfig {
-            security_rules: SecurityRules {
-                min_key_length: 256,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let validator = ValidationUtils::new(config);
-        let mut doc = Document::new();
-        doc.set_encryption_key_length(128);
+    #[tokio::test]
+    async fn test_pattern_validation() {
+        let mut config = ValidationConfig::default();
+        config.patterns.insert("digits".into(), r"^\d+$".into());
+        let validation = Validation::new(config);
         
-        let result = validator.validate_security(&doc).await;
-        assert!(result.is_err());
+        let result = validation.validate_pattern("digits", "123").await;
+        assert!(result.is_valid);
+        
+        let result = validation.validate_pattern("digits", "abc").await;
+        assert!(!result.is_valid);
     }
 
-    #[test]
-    async fn test_regex_validation() {
-        let validator = ValidationUtils::new(ValidationConfig::default());
+    #[tokio::test]
+    async fn test_email_validation() {
+        let validation = Validation::new(ValidationConfig::default());
         
-        assert!(validator.validate_email("test@example.com"));
-        assert!(!validator.validate_email("invalid-email"));
+        let result = validation.validate_email("test@example.com").await;
+        assert!(result.is_valid);
         
-        assert!(validator.validate_url("https://example.com"));
-        assert!(!validator.validate_url("invalid-url"));
-        
-        assert!(validator.validate_phone("+1-234-567-8900"));
-        assert!(!validator.validate_phone("abc"));
+        let result = validation.validate_email("invalid-email").await;
+        assert!(!result.is_valid);
     }
-}
+
+    #[tokio::test]
+    async fn test_url_validation() {
+        let validation = Validation::new(ValidationConfig::default());
+        
+        let result = validation.validate_url("https://example.com").await;
+        assert!(result.is_valid);
+        
+        let result = validation.validate_url("invalid-url").await;
+        assert!(!result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_path_validation() {
+        let validation = Validation::new(ValidationConfig::default());
+        
+        let result = validation.validate_path("/path/to/file").await;
+        assert!(result.is_valid);
+        
+        let result = validation.validate_path("invalid\\path").await;
+        assert!(!result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_custom_validator() {
+        struct EvenNumberValidator;
+        
+        #[async_trait]
+        impl Validator for EvenNumberValidator {
+            async fn validate(&self, value: &str) -> Result<()> {
+                match value.parse::<i32>() {
+                    Ok(n) if n % 2 == 0 => Ok(()),
+                    _ => Err(UtilError::Validation("Not an even number".into())),
+                }
+            }
+        }
+        
+        let validation = Validation::new(ValidationConfig::default());
+        validation.register_validator("even", EvenNumberValidator).await.unwrap();
+        
+        let validators = validation.validators.read().await;
+        let validator = validators.get("even").unwrap();
+        
+        assert!(validator.validate("2").await.is_ok());
+        assert!(validator.validate("3").await.is_err());
+    }
+        }
