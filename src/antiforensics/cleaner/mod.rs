@@ -1,7 +1,4 @@
-//! Cleaner module for PDF document sanitization
-//! Author: kartik4091
-//! Created: 2025-06-03 07:23:09 UTC
+// File: src/antiforensics/cleaner/mod.rs
+// Author: kartik4091
+// Created: 2025-06-03 08:00:41 UTC
 
-pub mod content_cleaner;
-pub mod structure_cleaner;
-pub mod metadata_cleaner;
