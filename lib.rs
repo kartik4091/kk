@@ -1,184 +1,275 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
-use tokio::sync::RwLock;
-use chrono::{DateTime, Utc};
-use serde::{Serialize, Deserialize};
+use std::{collections::BTreeMap, sync::Arc};
+use thiserror::Error;
+use uuid::Uuid;
 
-// Module declarations
 pub mod core;
-pub mod writer;
-pub mod version;
-pub mod metadata;
 pub mod security;
-pub mod forensics;
 pub mod verification;
-pub mod processing;
+pub mod writer;
+pub mod metrics;
+pub mod utils;
 
-pub use crate::core::Document;
-pub use crate::metadata::{clean_docinfo_metadata, remove_xmp_metadata};
-pub use crate::writer::save_document;
-
-// Error handling
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
+#[derive(Error, Debug)]
+pub enum PdfError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-
+    
     #[error("PDF processing error: {0}")]
     Processing(String),
-
-    #[error("Version error: {0}")]
-    Version(String),
-
-    #[error("Metadata error: {0}")]
-    Metadata(String),
-
+    
     #[error("Security error: {0}")]
     Security(String),
-
-    #[error("Forensic error: {0}")]
-    Forensic(String),
-
-    #[error("Verification error: {0}")]
-    Verification(String),
+    
+    #[error("Validation error: {0}")]
+    Validation(String),
+    
+    #[error("Configuration error: {0}")]
+    Configuration(String),
+    
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    
+    #[error("Compression error: {0}")]
+    Compression(String),
 }
 
-// Configuration structures
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessConfig {
-    pub clean_metadata: bool,
-    pub normalize_version: bool,
-    pub apply_security: bool,
-    pub forensic_clean: bool,
-    pub security: SecurityConfig,
-    pub user_metadata: Option<BTreeMap<String, String>>, // ✅ Custom metadata injection
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityConfig {
+pub struct ProcessingOptions {
+    pub optimize: bool,
+    pub compress: bool,
     pub encrypt: bool,
-    pub user_password: Option<String>,
-    pub owner_password: Option<String>,
-    pub permissions: Vec<String>,
+    pub validate: bool,
+    pub sign: bool,
 }
 
-// Main PDF Engine structure
+impl Default for ProcessingOptions {
+    fn default() -> Self {
+        Self {
+            optimize: true,
+            compress: true,
+            encrypt: false,
+            validate: true,
+            sign: false,
+        }
+    }
+}
+
 #[derive(Debug)]
+pub struct ProcessingResult {
+    pub document_id: String,
+    pub processed_bytes: usize,
+    pub compression_ratio: f64,
+    pub processing_time: std::time::Duration,
+    pub status: ProcessingStatus,
+}
+
+#[derive(Debug)]
+pub enum ProcessingStatus {
+    Success,
+    PartialSuccess(String),
+    Failed(String),
+}
+
+#[derive(Clone)]
+pub struct EngineConfig {
+    pub max_concurrent_jobs: usize,
+    pub buffer_size: usize,
+    pub temp_dir: std::path::PathBuf,
+    pub metrics_enabled: bool,
+}
+
+impl Default for EngineConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_jobs: num_cpus::get(),
+            buffer_size: 8 * 1024 * 1024, // 8MB
+            temp_dir: std::env::temp_dir(),
+            metrics_enabled: true,
+        }
+    }
+}
+
 pub struct PdfEngine {
-    context: EngineContext,
-    state: Arc<RwLock<EngineState>>,
+    config: EngineConfig,
     core: Arc<core::CoreSystem>,
-    version: Arc<version::VersionSystem>,
-    metadata: Arc<metadata::MetadataSystem>,
+    writer: Arc<writer::WriterSystem>,
     security: Arc<security::SecuritySystem>,
-    forensics: Arc<forensics::ForensicSystem>,
     verification: Arc<verification::VerificationSystem>,
-}
-
-#[derive(Debug, Clone)]
-struct EngineContext {
-    timestamp: DateTime<Utc>,
-    user: String,
-    version: String,
-}
-
-#[derive(Debug)]
-struct EngineState {
-    processing_count: u64,
-    last_processed: Option<DateTime<Utc>>,
-    active_tasks: u32,
+    metrics: Arc<metrics::MetricsRegistry>,
 }
 
 impl PdfEngine {
-    pub async fn new() -> Result<Self, Error> {
-        let context = EngineContext {
-            timestamp: DateTime::from_utc(
-                chrono::NaiveDateTime::parse_from_str(
-                    "2025-05-31 19:58:03",
-                    "%Y-%m-%d %H:%M:%S"
-                ).unwrap(),
-                Utc,
-            ),
-            user: "kartik6717".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+    pub async fn new(config: Option<EngineConfig>) -> Result<Self, PdfError> {
+        let config = config.unwrap_or_default();
+        let metrics = if config.metrics_enabled {
+            Arc::new(metrics::MetricsRegistry::new()?)
+        } else {
+            Arc::new(metrics::MetricsRegistry::disabled())
         };
 
-        let state = Arc::new(RwLock::new(EngineState {
-            processing_count: 0,
-            last_processed: None,
-            active_tasks: 0,
-        }));
+        let core = Arc::new(core::CoreSystem::new(&config, metrics.clone()).await?);
+        let writer = Arc::new(writer::WriterSystem::new(&config, metrics.clone()).await?);
+        let security = Arc::new(security::SecuritySystem::new(&config, metrics.clone()).await?);
+        let verification = Arc::new(verification::VerificationSystem::new(&config, metrics.clone()).await?);
 
         Ok(Self {
-            context,
-            state,
-            core: Arc::new(core::CoreSystem::new().await?),
-            version: Arc::new(version::VersionSystem::new().await?),
-            metadata: Arc::new(metadata::MetadataSystem::new().await?),
-            security: Arc::new(security::SecuritySystem::new().await?),
-            forensics: Arc::new(forensics::ForensicSystem::new().await?),
-            verification: Arc::new(verification::VerificationSystem::new().await?),
+            config,
+            core,
+            writer,
+            security,
+            verification,
+            metrics,
         })
     }
 
-    pub async fn process_document(&self, input: &[u8], config: ProcessConfig) -> Result<Vec<u8>, Error> {
-        let mut state = self.state.write().await;
-        state.active_tasks += 1;
-        state.processing_count += 1;
+    pub async fn process_document(
+        &self,
+        input: &[u8],
+        options: Option<ProcessingOptions>
+    ) -> Result<ProcessingResult, PdfError> {
+        let start_time = std::time::Instant::now();
+        let document_id = Uuid::new_v4().to_string();
+        let options = options.unwrap_or_default();
 
-        println!("Starting document processing");
-        println!("Timestamp: {}", self.context.timestamp);
-        println!("User: {}", self.context.user);
+        // Track active jobs
+        self.metrics.active_operations.inc();
+        let _timer = self.metrics.processing_duration.start_timer();
 
-        let mut document = self.core.parse_document(input).await?;
+        let result = self.internal_process_document(input, &document_id, &options).await;
 
-        if config.normalize_version {
-            self.version.normalize_to_1_4(&mut document).await?;
+        // Update metrics
+        self.metrics.active_operations.dec();
+        self.metrics.documents_processed.inc();
+        self.metrics.bytes_processed.inc_by(input.len() as f64);
+
+        match result {
+            Ok(processed_data) => {
+                let compression_ratio = if input.len() > 0 {
+                    processed_data.len() as f64 / input.len() as f64
+                } else {
+                    1.0
+                };
+
+                Ok(ProcessingResult {
+                    document_id,
+                    processed_bytes: processed_data.len(),
+                    compression_ratio,
+                    processing_time: start_time.elapsed(),
+                    status: ProcessingStatus::Success,
+                })
+            }
+            Err(e) => {
+                self.metrics.processing_errors.inc();
+                Ok(ProcessingResult {
+                    document_id,
+                    processed_bytes: 0,
+                    compression_ratio: 1.0,
+                    processing_time: start_time.elapsed(),
+                    status: ProcessingStatus::Failed(e.to_string()),
+                })
+            }
         }
-
-        if config.clean_metadata {
-            self.metadata.clean_metadata(&mut document).await?;
-        }
-
-        // ✅ Inject user-defined metadata if present
-        if let Some(ref meta) = config.user_metadata {
-            self.metadata.inject_metadata(&mut document, meta.clone()).await?;
-        }
-
-        if config.apply_security {
-            self.security.apply_security(&mut document, &config.security).await?;
-        }
-
-        if config.forensic_clean {
-            self.forensics.clean_document(&mut document).await?;
-        }
-
-        self.verification.verify_document(&document).await?;
-
-        state.last_processed = Some(Utc::now());
-        state.active_tasks -= 1;
-
-        self.core.write_document(&document).await
     }
 
-    pub async fn get_stats(&self) -> Result<EngineStats, Error> {
-        let state = self.state.read().await;
-        Ok(EngineStats {
-            total_processed: state.processing_count,
-            active_tasks: state.active_tasks,
-            last_processed: state.last_processed,
-            uptime: Utc::now() - self.context.timestamp,
-        })
+    async fn internal_process_document(
+        &self,
+        input: &[u8],
+        document_id: &str,
+        options: &ProcessingOptions,
+    ) -> Result<Vec<u8>, PdfError> {
+        // Step 1: Validation
+        if options.validate {
+            let verification_result = self.verification.verify_document(input).await?;
+            if !verification_result.is_valid {
+                return Err(PdfError::Validation(verification_result.message));
+            }
+        }
+
+        // Step 2: Security checks
+        let security_result = self.security.check_document(input).await?;
+        if !security_result.is_secure {
+            return Err(PdfError::Security(security_result.message));
+        }
+
+        // Step 3: Core processing
+        let mut processed_data = self.core.process_document(input).await?;
+
+        // Step 4: Optimization
+        if options.optimize {
+            processed_data = self.writer.optimize_document(&processed_data).await?;
+        }
+
+        // Step 5: Compression
+        if options.compress {
+            processed_data = self.writer.compress_document(&processed_data).await?;
+        }
+
+        // Step 6: Encryption
+        if options.encrypt {
+            processed_data = self.security.encrypt_document(&processed_data).await?;
+        }
+
+        // Step 7: Digital Signature
+        if options.sign {
+            processed_data = self.security.sign_document(&processed_data).await?;
+        }
+
+        Ok(processed_data)
+    }
+
+    pub fn metrics(&self) -> Arc<metrics::MetricsRegistry> {
+        self.metrics.clone()
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct EngineStats {
-    total_processed: u64,
-    active_tasks: u32,
-    last_processed: Option<DateTime<Utc>>,
-    uptime: chrono::Duration,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::fs;
+
+    #[tokio::test]
+    async fn test_pdf_engine_creation() {
+        let engine = PdfEngine::new(None).await;
+        assert!(engine.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pdf_processing() {
+        let engine = PdfEngine::new(None).await.unwrap();
+        let sample_pdf = include_bytes!("../tests/data/sample.pdf");
+        let result = engine.process_document(sample_pdf, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pdf_optimization() {
+        let engine = PdfEngine::new(None).await.unwrap();
+        let sample_pdf = include_bytes!("../tests/data/sample.pdf");
+        
+        let options = ProcessingOptions {
+            optimize: true,
+            compress: true,
+            ..Default::default()
+        };
+
+        let result = engine.process_document(sample_pdf, Some(options)).await.unwrap();
+        assert!(matches!(result.status, ProcessingStatus::Success));
+        assert!(result.compression_ratio < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_pdf_encryption() {
+        let engine = PdfEngine::new(None).await.unwrap();
+        let sample_pdf = include_bytes!("../tests/data/sample.pdf");
+        
+        let options = ProcessingOptions {
+            encrypt: true,
+            ..Default::default()
+        };
+
+        let result = engine.process_document(sample_pdf, Some(options)).await.unwrap();
+        assert!(matches!(result.status, ProcessingStatus::Success));
+    }
 }
 
-// ✅ Re-exports for convenience
-pub use crate::core::Document;
-pub use self::Error;
+pub use chrono::{DateTime, Utc};
+pub use lopdf::Document;
