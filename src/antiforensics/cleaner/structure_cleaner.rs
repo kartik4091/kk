@@ -1,420 +1,538 @@
-//! Structure cleaner for PDF document sanitization
+//! Structure cleaning implementation for PDF anti-forensics
+//! Created: 2025-06-03 14:26:59 UTC
 //! Author: kartik4091
-//! Created: 2025-06-03 04:35:17 UTC
-//! This module provides structural cleaning capabilities
-//! for removing or sanitizing document structure elements.
 
-use std::{
-    sync::Arc,
-    collections::HashMap,
-    time::{Duration, Instant},
-};
-use async_trait::async_trait;
-use tracing::{info, warn, error, debug, trace, instrument};
+use std::collections::{HashMap, HashSet};
+use tracing::{debug, error, info, instrument, warn};
 
-use super::CleaningConfig;
-use crate::antiforensics::{
-    Document,
-    PdfError,
-    RiskLevel,
-    ForensicArtifact,
-    ArtifactType,
+use crate::{
+    error::{Error, Result},
+    types::{Document, Object, ObjectId, XRefEntry, XRefTable},
 };
 
-/// Result of structure cleaning operation
-#[derive(Debug)]
-pub struct StructureCleaningStats {
-    /// Number of artifacts successfully cleaned
-    pub cleaned: usize,
-    /// List of failed cleanings
-    pub failed: Vec<super::FailedCleaning>,
-}
-
-/// Structure cleaner implementation
+/// Structure cleaner for PDF documents
 pub struct StructureCleaner {
-    /// Cleaner configuration
-    config: Arc<CleaningConfig>,
-    /// Cleaning strategies
-    strategies: Vec<Box<dyn StructureStrategy>>,
+    /// Cleaning statistics
+    stats: CleaningStats,
+    
+    /// Object references
+    references: HashMap<ObjectId, HashSet<ObjectId>>,
+    
+    /// Removed objects
+    removed_objects: HashSet<ObjectId>,
 }
 
-/// Interface for structure cleaning strategies
-#[async_trait]
-trait StructureStrategy: Send + Sync {
-    /// Attempts to clean structure
-    async fn clean(
-        &self,
-        doc: &mut Document,
-        artifact: &ForensicArtifact,
-    ) -> Result<bool, PdfError>;
-
-    /// Returns strategy name
-    fn name(&self) -> &'static str;
+/// Structure cleaning statistics
+#[derive(Debug, Default)]
+pub struct CleaningStats {
+    /// Number of objects removed
+    pub objects_removed: usize,
+    
+    /// Number of references updated
+    pub references_updated: usize,
+    
+    /// Number of cross-references updated
+    pub xrefs_updated: usize,
+    
+    /// Number of structure optimizations
+    pub optimizations: usize,
+    
+    /// Processing duration in milliseconds
+    pub duration_ms: u64,
 }
 
-/// Strategy for cleaning named destinations
-struct NamedDestinationStrategy;
+/// Structure cleaning configuration
+#[derive(Debug, Clone)]
+pub struct CleaningConfig {
+    /// Remove unreferenced objects
+    pub remove_unreferenced: bool,
+    
+    /// Optimize object structure
+    pub optimize_structure: bool,
+    
+    /// Compact object numbers
+    pub compact_numbers: bool,
+    
+    /// Update cross-references
+    pub update_xrefs: bool,
+}
 
-/// Strategy for cleaning document outline
-struct OutlineStrategy;
-
-/// Strategy for cleaning page tree
-struct PageTreeStrategy;
-
-/// Strategy for cleaning optional content
-struct OptionalContentStrategy;
+impl Default for CleaningConfig {
+    fn default() -> Self {
+        Self {
+            remove_unreferenced: true,
+            optimize_structure: true,
+            compact_numbers: true,
+            update_xrefs: true,
+        }
+    }
+}
 
 impl StructureCleaner {
-    /// Creates a new structure cleaner instance
-    #[instrument(skip(config))]
-    pub fn new(config: CleaningConfig) -> Self {
-        debug!("Initializing StructureCleaner");
-
-        let strategies: Vec<Box<dyn StructureStrategy>> = vec![
-            Box::new(NamedDestinationStrategy),
-            Box::new(OutlineStrategy),
-            Box::new(PageTreeStrategy),
-            Box::new(OptionalContentStrategy),
-        ];
-
+    /// Create a new structure cleaner
+    pub fn new() -> Self {
         Self {
-            config: Arc::new(config),
-            strategies,
+            stats: CleaningStats::default(),
+            references: HashMap::new(),
+            removed_objects: HashSet::new(),
         }
     }
-
-    /// Cleans structure artifacts from a document
-    #[instrument(skip(self, doc, artifacts), err(Display))]
-    pub async fn clean(
-        &self,
-        doc: &mut Document,
-        artifacts: &[ForensicArtifact],
-    ) -> Result<StructureCleaningStats, PdfError> {
-        let mut stats = StructureCleaningStats {
-            cleaned: 0,
-            failed: Vec::new(),
+    
+    /// Clean document structure
+    #[instrument(skip(self, document))]
+    pub async fn clean_document(&mut self, document: Document) -> Result<(Document, usize)> {
+        let start_time = std::time::Instant::now();
+        info!("Starting structure cleaning");
+        
+        let mut cleaned_doc = document;
+        
+        // Build reference map
+        self.build_reference_map(&cleaned_doc);
+        
+        // Remove unreferenced objects
+        self.remove_unreferenced_objects(&mut cleaned_doc)?;
+        
+        // Optimize object structure
+        self.optimize_structure(&mut cleaned_doc)?;
+        
+        // Update cross-references
+        self.update_cross_references(&mut cleaned_doc)?;
+        
+        // Compact object numbers
+        self.compact_object_numbers(&mut cleaned_doc)?;
+        
+        // Update statistics
+        self.stats.duration_ms = start_time.elapsed().as_millis() as u64;
+        let total_changes = self.stats.objects_removed + 
+                          self.stats.references_updated +
+                          self.stats
+                          .optimizations;
+                          
+        info!("Structure cleaning completed with {} changes", total_changes);
+        Ok((cleaned_doc, total_changes))
+    }
+    
+    /// Build object reference map
+    fn build_reference_map(&mut self, document: &Document) {
+        self.references.clear();
+        
+        for (&object_id, object) in &document.structure.objects {
+            let mut refs = HashSet::new();
+            self.collect_references(object, &mut refs);
+            if !refs.is_empty() {
+                self.references.insert(object_id, refs);
+            }
+        }
+    }
+    
+    /// Collect object references
+    fn collect_references(&self, object: &Object, refs: &mut HashSet<ObjectId>) {
+        match object {
+            Object::Reference(id) => {
+                refs.insert(*id);
+            }
+            Object::Array(array) => {
+                for item in array {
+                    self.collect_references(item, refs);
+                }
+            }
+            Object::Dictionary(dict) => {
+                for value in dict.values() {
+                    self.collect_references(value, refs);
+                }
+            }
+            Object::Stream { dict, .. } => {
+                for value in dict.values() {
+                    self.collect_references(value, refs);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    /// Remove unreferenced objects
+    fn remove_unreferenced_objects(&mut self, document: &mut Document) -> Result<()> {
+        let mut referenced = HashSet::new();
+        
+        // Add root and essential objects
+        referenced.insert(document.structure.trailer.root);
+        if let Some(info) = document.structure.trailer.info {
+            referenced.insert(info);
+        }
+        
+        // Add objects referenced from root
+        let mut to_process = vec![document.structure.trailer.root];
+        while let Some(id) = to_process.pop() {
+            if let Some(refs) = self.references.get(&id) {
+                for &ref_id in refs {
+                    if referenced.insert(ref_id) {
+                        to_process.push(ref_id);
+                    }
+                }
+            }
+        }
+        
+        // Remove unreferenced objects
+        let mut removed = 0;
+        document.structure.objects.retain(|&id, _| {
+            let keep = referenced.contains(&id);
+            if !keep {
+                removed += 1;
+                self.removed_objects.insert(id);
+            }
+            keep
+        });
+        
+        self.stats.objects_removed += removed;
+        Ok(())
+    }
+    
+    /// Optimize object structure
+    fn optimize_structure(&mut self, document: &mut Document) -> Result<()> {
+        let mut optimizations = 0;
+        
+        // Merge small streams
+        optimizations += self.merge_small_streams(document)?;
+        
+        // Combine similar objects
+        optimizations += self.combine_similar_objects(document)?;
+        
+        self.stats.optimizations += optimizations;
+        Ok(())
+    }
+    
+    /// Merge small streams
+    fn merge_small_streams(&mut self, document: &mut Document) -> Result<usize> {
+        let mut merged = 0;
+        let mut small_streams = Vec::new();
+        
+        // Collect small streams
+        for (&id, object) in &document.structure.objects {
+            if let Object::Stream { dict, data } = object {
+                if data.len() < 1024 {  // Threshold for small streams
+                    small_streams.push(id);
+                }
+            }
+        }
+        
+        // Merge consecutive small streams
+        for window in small_streams.windows(2) {
+            if let [id1, id2] = window {
+                if let (Some(Object::Stream { dict: dict1, data: data1 }), 
+                        Some(Object::Stream { dict: dict2, data: data2 })) = 
+                    (document.structure.objects.get(id1), document.structure.objects.get(id2)) {
+                    if self.can_merge_streams(dict1, dict2) {
+                        let merged_data = [data1.clone(), data2.clone()].concat();
+                        let mut merged_dict = dict1.clone();
+                        merged_dict.insert(b"Length".to_vec(), Object::Integer(merged_data.len() as i64));
+                        
+                        document.structure.objects.insert(*id1, Object::Stream {
+                            dict: merged_dict,
+                            data: merged_data,
+                        });
+                        document.structure.objects.remove(id2);
+                        merged += 1;
+                    }
+                }
+            }
+        }
+        
+        Ok(merged)
+    }
+    
+    /// Check if streams can be merged
+    fn can_merge_streams(&self, dict1: &HashMap<Vec<u8>, Object>, dict2: &HashMap<Vec<u8>, Object>) -> bool {
+        // Check if streams have compatible filters and types
+        let filter1 = dict1.get(b"Filter");
+        let filter2 = dict2.get(b"Filter");
+        let type1 = dict1.get(b"Type");
+        let type2 = dict2.get(b"Type");
+        
+        filter1 == filter2 && type1 == type2
+    }
+    
+    /// Combine similar objects
+    fn combine_similar_objects(&mut self, document: &mut Document) -> Result<usize> {
+        let mut combined = 0;
+        let mut object_map = HashMap::new();
+        
+        // Group similar objects
+        for (&id, object) in &document.structure.objects {
+            let hash = self.calculate_object_hash(object);
+            object_map.entry(hash).or_insert_with(Vec::new).push(id);
+        }
+        
+        // Combine objects with same hash
+        for ids in object_map.values() {
+            if ids.len() > 1 {
+                let &primary = ids.first().unwrap();
+                for &duplicate in &ids[1..] {
+                    self.update_references(document, duplicate, primary)?;
+                    document.structure.objects.remove(&duplicate);
+                    combined += 1;
+                }
+            }
+        }
+        
+        Ok(combined)
+    }
+    
+    /// Calculate object hash for comparison
+    fn calculate_object_hash(&self, object: &Object) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        
+        let mut hasher = DefaultHasher::new();
+        match object {
+            Object::Stream { dict, data } => {
+                // Hash stream type and filter
+                if let Some(type_obj) = dict.get(b"Type") {
+                    type_obj.hash(&mut hasher);
+                }
+                if let Some(filter) = dict.get(b"Filter") {
+                    filter.hash(&mut hasher);
+                }
+                // Hash first 1KB of data
+                data.iter().take(1024).for_each(|b| b.hash(&mut hasher));
+            }
+            _ => {
+                object.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+    
+    /// Update references to combined objects
+    fn update_references(&mut self, document: &mut Document, from: ObjectId, to: ObjectId) -> Result<()> {
+        for object in document.structure.objects.values_mut() {
+            self.replace_reference(object, from, to);
+        }
+        self.stats.references_updated += 1;
+        Ok(())
+    }
+    
+    /// Replace object reference
+    fn replace_reference(&self, object: &mut Object, from: ObjectId, to: ObjectId) {
+        match object {
+            Object::Reference(id) if *id == from => {
+                *id = to;
+            }
+            Object::Array(array) => {
+                for item in array {
+                    self.replace_reference(item, from, to);
+                }
+            }
+            Object::Dictionary(dict) => {
+                for value in dict.values_mut() {
+                    self.replace_reference(value, from, to);
+                }
+            }
+            Object::Stream { dict, .. } => {
+                for value in dict.values_mut() {
+                    self.replace_reference(value, from, to);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    /// Update cross-references
+    fn update_cross_references(&mut self, document: &mut Document) -> Result<()> {
+        let mut updated = 0;
+        let mut new_xref = XRefTable {
+            offset: 0,
+            entries: Vec::new(),
+            compressed: false,
         };
-
-        for artifact in artifacts {
-            if !matches!(artifact.artifact_type, ArtifactType::Structure) {
-                continue;
-            }
-
-            let mut cleaned = false;
-            let mut last_error = None;
-
-            // Try each strategy until one succeeds
-            for strategy in &self.strategies {
-                match strategy.clean(doc, artifact).await {
-                    Ok(true) => {
-                        cleaned = true;
-                        debug!(
-                            "Successfully cleaned structure artifact {} using strategy {}",
-                            artifact.id,
-                            strategy.name()
-                        );
-                        break;
-                    }
-                    Ok(false) => continue,
-                    Err(e) => {
-                        warn!(
-                            "Strategy {} failed to clean structure artifact {}: {}",
-                            strategy.name(),
-                            artifact.id,
-                            e
-                        );
-                        last_error = Some(e);
-                    }
-                }
-            }
-
-            if cleaned {
-                stats.cleaned += 1;
-            } else {
-                stats.failed.push(super::FailedCleaning {
-                    artifact: artifact.clone(),
-                    error: last_error
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "No suitable structure cleaning strategy found".into()),
-                    strategy: "structure".into(),
+        
+        let mut offset = 0;
+        for (&id, object) in &document.structure.objects {
+            if !self.removed_objects.contains(&id) {
+                new_xref.entries.push(XRefEntry {
+                    object_id: id,
+                    offset,
+                    generation: 0,
+                    entry_type: crate::types::XRefEntryType::InUse,
                 });
+                offset += self.calculate_object_size(object);
+                updated += 1;
             }
         }
-
-        Ok(stats)
+        
+        document.structure.xref_tables = vec![new_xref];
+        self.stats.xrefs_updated += updated;
+        Ok(())
     }
-}
-
-#[async_trait]
-impl StructureStrategy for NamedDestinationStrategy {
-    #[instrument(skip(self, doc, artifact), err(Display))]
-    async fn clean(
-        &self,
-        doc: &mut Document,
-        artifact: &ForensicArtifact,
-    ) -> Result<bool, PdfError> {
-        // Handle named destinations in the Names tree
-        if let Some(names) = doc.get_names()? {
-            if let Some(dests) = names.get_destinations()? {
-                if dests.remove(&artifact.location)? {
-                    // Update the Names tree
-                    doc.update_names(&names)?;
-                    return Ok(true);
-                }
+    
+    /// Calculate object size
+    fn calculate_object_size(&self, object: &Object) -> u64 {
+        match object {
+            Object::Stream { dict, data } => {
+                // Rough estimation: dictionary size + stream data size
+                let dict_size = dict.iter()
+                    .map(|(k, v)| k.len() + self.calculate_object_size(v))
+                    .sum::<u64>();
+                dict_size + data.len() as u64
             }
-        }
-        Ok(false)
-    }
-
-    fn name(&self) -> &'static str {
-        "named_destination"
-    }
-}
-
-#[async_trait]
-impl StructureStrategy for OutlineStrategy {
-    #[instrument(skip(self, doc, artifact), err(Display))]
-    async fn clean(
-        &self,
-        doc: &mut Document,
-        artifact: &ForensicArtifact,
-    ) -> Result<bool, PdfError> {
-        // Handle document outline (bookmarks)
-        if let Some(outline) = doc.get_outline_mut()? {
-            let mut cleaned = false;
-            
-            // Recursively clean outline items
-            fn clean_item(
-                item: &mut OutlineItem,
-                location: &str,
-            ) -> Result<bool, PdfError> {
-                // Check if this item matches
-                if item.get_destination()? == location {
-                    item.remove_destination()?;
-                    return Ok(true);
-                }
-
-                // Check children
-                for child in item.get_children_mut() {
-                    if clean_item(child, location)? {
-                        return Ok(true);
-                    }
-                }
-
-                Ok(false)
+            Object::Dictionary(dict) => {
+                dict.iter()
+                    .map(|(k, v)| k.len() + self.calculate_object_size(v))
+                    .sum()
             }
-
-            // Clean from root items
-            for item in outline.get_items_mut() {
-                if clean_item(item, &artifact.location)? {
-                    cleaned = true;
-                    break;
-                }
+            Object::Array(array) => {
+                array.iter()
+                    .map(|obj| self.calculate_object_size(obj))
+                    .sum()
             }
-
-            if cleaned {
-                doc.update_outline(&outline)?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    fn name(&self) -> &'static str {
-        "outline"
-    }
-}
-
-#[async_trait]
-impl StructureStrategy for PageTreeStrategy {
-    #[instrument(skip(self, doc, artifact), err(Display))]
-    async fn clean(
-        &self,
-        doc: &mut Document,
-        artifact: &ForensicArtifact,
-    ) -> Result<bool, PdfError> {
-        // Handle page tree structure
-        if let Some(page_tree) = doc.get_page_tree_mut()? {
-            // Check if artifact refers to a page node
-            if let Some(node) = page_tree.find_node(&artifact.location)? {
-                match artifact.metadata.get("action").map(String::as_str) {
-                    Some("remove") => {
-                        // Remove the page and its descendants
-                        page_tree.remove_node(&artifact.location)?;
-                        doc.update_page_tree(&page_tree)?;
-                        Ok(true)
-                    }
-                    Some("sanitize") => {
-                        // Remove sensitive attributes but keep structure
-                        node.remove_attributes()?;
-                        doc.update_page_tree(&page_tree)?;
-                        Ok(true)
-                    }
-                    _ => Ok(false),
-                }
-            } else {
-                Ok(false)
-            }
-        } else {
-            Ok(false)
+            Object::String(s) | Object::Name(s) => s.len() as u64,
+            Object::Integer(_) | Object::Real(_) => 8,
+            Object::Reference(_) => 16,
+            Object::Boolean(_) => 1,
+            Object::Null => 4,
         }
     }
-
-    fn name(&self) -> &'static str {
-        "page_tree"
-    }
-}
-
-#[async_trait]
-impl StructureStrategy for OptionalContentStrategy {
-    #[instrument(skip(self, doc, artifact), err(Display))]
-    async fn clean(
-        &self,
-        doc: &mut Document,
-        artifact: &ForensicArtifact,
-    ) -> Result<bool, PdfError> {
-        // Handle optional content (layers)
-        if let Some(oc_properties) = doc.get_optional_content_properties_mut()? {
-            if let Some(group) = oc_properties.find_group(&artifact.location)? {
-                match artifact.metadata.get("action").map(String::as_str) {
-                    Some("remove") => {
-                        // Remove the optional content group
-                        oc_properties.remove_group(&artifact.location)?;
-                        doc.update_optional_content_properties(&oc_properties)?;
-                        Ok(true)
-                    }
-                    Some("disable") => {
-                        // Disable the optional content group
-                        group.set_visible(false)?;
-                        doc.update_optional_content_properties(&oc_properties)?;
-                        Ok(true)
-                    }
-                    _ => Ok(false),
-                }
-            } else {
-                Ok(false)
+    
+    /// Compact object numbers
+    fn compact_object_numbers(&mut self, document: &mut Document) -> Result<()> {
+        let mut number_map = HashMap::new();
+        let mut next_number = 1u32;
+        
+        // Create mapping of old to new numbers
+        for &id in document.structure.objects.keys() {
+            if !self.removed_objects.contains(&id) {
+                number_map.insert(id, ObjectId {
+                    number: next_number,
+                    generation: 0,
+                });
+                next_number += 1;
             }
-        } else {
-            Ok(false)
+        }
+        
+        // Update object references
+        let mut new_objects = HashMap::new();
+        for (old_id, object) in document.structure.objects.drain() {
+            if let Some(&new_id) = number_map.get(&old_id) {
+                let mut new_object = object;
+                self.update_object_references(&mut new_object, &number_map);
+                new_objects.insert(new_id, new_object);
+            }
+        }
+        
+        document.structure.objects = new_objects;
+        
+        // Update trailer
+        if let Some(&new_root) = number_map.get(&document.structure.trailer.root) {
+            document.structure.trailer.root = new_root;
+        }
+        if let Some(info) = document.structure.trailer.info {
+            if let Some(&new_info) = number_map.get(&info) {
+                document.structure.trailer.info = Some(new_info);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Update object references after compaction
+    fn update_object_references(&self, object: &mut Object, number_map: &HashMap<ObjectId, ObjectId>) {
+        match object {
+            Object::Reference(id) => {
+                if let Some(&new_id) = number_map.get(id) {
+                    *id = new_id;
+                }
+            }
+            Object::Array(array) => {
+                for item in array {
+                    self.update_object_references(item, number_map);
+                }
+            }
+            Object::Dictionary(dict) => {
+                for value in dict.values_mut() {
+                    self.update_object_references(value, number_map);
+                }
+            }
+            Object::Stream { dict, .. } => {
+                for value in dict.values_mut() {
+                    self.update_object_references(value, number_map);
+                }
+            }
+            _ => {}
         }
     }
-
-    fn name(&self) -> &'static str {
-        "optional_content"
+    
+    /// Get cleaning statistics
+    pub fn statistics(&self) -> &CleaningStats {
+        &self.stats
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::test;
-
+    
     #[test]
-    async fn test_named_destination_cleaning() {
-        let mut doc = Document::new();
-        doc.add_named_destination("test", Destination::new_xyz(1, 0.0, 0.0, 1.0)).unwrap();
+    fn test_build_reference_map() {
+        let mut cleaner = StructureCleaner::new();
+        let mut document = Document::default();
         
-        let artifact = ForensicArtifact {
-            artifact_type: ArtifactType::Structure,
-            location: "test".into(),
-            ..Default::default()
-        };
-
-        let strategy = NamedDestinationStrategy;
-        assert!(strategy.clean(&mut doc, &artifact).await.unwrap());
-        assert!(doc.get_names()
-            .unwrap()
-            .get_destinations()
-            .unwrap()
-            .is_empty());
+        let id1 = ObjectId { number: 1, generation: 0 };
+        let id2 = ObjectId { number: 2, generation: 0 };
+        
+        document.structure.objects.insert(id1, Object::Reference(id2));
+        
+        cleaner.build_reference_map(&document);
+        
+        assert!(cleaner.references.contains_key(&id1));
+        assert!(cleaner.references[&id1].contains(&id2));
     }
-
+    
     #[test]
-    async fn test_outline_cleaning() {
-        let mut doc = Document::new();
-        let mut outline = Outline::new();
-        outline.add_item(OutlineItem::new("Test", "test_dest")).unwrap();
-        doc.set_outline(&outline).unwrap();
+    fn test_remove_unreferenced_objects() {
+        let mut cleaner = StructureCleaner::new();
+        let mut document = Document::default();
         
-        let artifact = ForensicArtifact {
-            artifact_type: ArtifactType::Structure,
-            location: "test_dest".into(),
-            ..Default::default()
-        };
-
-        let strategy = OutlineStrategy;
-        assert!(strategy.clean(&mut doc, &artifact).await.unwrap());
-        assert!(doc.get_outline()
-            .unwrap()
-            .get_items()
-            .next()
-            .unwrap()
-            .get_destination()
-            .unwrap()
-            .is_empty());
+        let root = ObjectId { number: 1, generation: 0 };
+        let referenced = ObjectId { number: 2, generation: 0 };
+        let unreferenced = ObjectId { number: 3, generation: 0 };
+        
+        document.structure.trailer.root = root;
+        document.structure.objects.insert(root, Object::Reference(referenced));
+        document.structure.objects.insert(referenced, Object::Null);
+        document.structure.objects.insert(unreferenced, Object::Null);
+        
+        cleaner.remove_unreferenced_objects(&mut document).unwrap();
+        
+        assert!(document.structure.objects.contains_key(&root));
+        assert!(document.structure.objects.contains_key(&referenced));
+        assert!(!document.structure.objects.contains_key(&unreferenced));
     }
-
+    
     #[test]
-    async fn test_page_tree_cleaning() {
-        let mut doc = Document::new();
-        let page_ref = doc.add_page().unwrap();
+    fn test_merge_small_streams() {
+        let mut cleaner = StructureCleaner::new();
+        let mut document = Document::default();
         
-        let mut metadata = HashMap::new();
-        metadata.insert("action".into(), "remove".into());
+        let id1 = ObjectId { number: 1, generation: 0 };
+        let id2 = ObjectId { number: 2, generation: 0 };
         
-        let artifact = ForensicArtifact {
-            artifact_type: ArtifactType::Structure,
-            location: page_ref,
-            metadata,
-            ..Default::default()
-        };
-
-        let strategy = PageTreeStrategy;
-        assert!(strategy.clean(&mut doc, &artifact).await.unwrap());
-        assert_eq!(doc.get_page_count().unwrap(), 0);
-    }
-
-    #[test]
-    async fn test_optional_content_cleaning() {
-        let mut doc = Document::new();
-        doc.add_optional_content_group("test", "Test Layer").unwrap();
+        let mut dict1 = HashMap::new();
+        dict1.insert(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
         
-        let mut metadata = HashMap::new();
-        metadata.insert("action".into(), "disable".into());
+        let mut dict2 = HashMap::new();
+        dict2.insert(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
         
-        let artifact = ForensicArtifact {
-            artifact_type: ArtifactType::Structure,
-            location: "test".into(),
-            metadata,
-            ..Default::default()
-        };
-
-        let strategy = OptionalContentStrategy;
-        assert!(strategy.clean(&mut doc, &artifact).await.unwrap());
-        assert!(!doc.get_optional_content_properties()
-            .unwrap()
-            .find_group("test")
-            .unwrap()
-            .is_visible()
-            .unwrap());
-    }
-
-    #[test]
-    async fn test_structure_cleaner() {
-        let cleaner = StructureCleaner::new(CleaningConfig::default());
-        let mut doc = Document::new();
-        doc.add_named_destination("test", Destination::new_xyz(1, 0.0, 0.0, 1.0)).unwrap();
+        document.structure.objects.insert(id1, Object::Stream {
+            dict: dict1,
+            data: vec![1, 2, 3],
+        });
         
-        let artifacts = vec![
-            ForensicArtifact {
-                artifact_type: ArtifactType::Structure,
-                location: "test".into(),
-                ..Default::default()
-            },
-        ];
-
-        let stats = cleaner.clean(&mut doc, &artifacts).await.unwrap();
-        assert_eq!(stats.cleaned, 1);
-        assert!(stats.failed.is_empty());
+        document.structure.objects.insert(id2, Object::Stream {
+            dict: dict2,
+            data: vec![4, 5, 6],
+        });
+        
+        cleaner.merge_small_streams(&mut document).unwrap();
+        
+        assert!(document.structure.objects.len() < 2);
     }
 }
