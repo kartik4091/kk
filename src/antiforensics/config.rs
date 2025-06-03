@@ -1,224 +1,342 @@
-//! Configuration types for PDF anti-forensics operations
+//! Configuration management for antiforensics system
+//! Created: 2025-06-03 12:13:36 UTC
 //! Author: kartik4091
-//! Created: 2025-06-03 10:19:43 UTC
-//! This module defines configuration structures used throughout the system.
 
 use std::{
-    path::PathBuf,
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
-use serde::{Deserialize, Serialize};
-use crate::types::{
-    VerificationLevel,
-    UserMetadata,
-    SecurityOptions,
-};
 
-/// Main processing configuration
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn, Level};
+
+use crate::error::{Error, Result};
+
+/// Core configuration structure for the antiforensics system
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcessingConfig {
-    /// Input PDF path
-    pub input_path: PathBuf,
-    /// Output PDF path
-    pub output_path: PathBuf,
-    /// Verification level
-    pub verification_level: VerificationLevel,
-    /// User metadata
-    pub user_metadata: Option<UserMetadata>,
-    /// Security options
-    pub security_options: Option<SecurityOptions>,
-    /// Performance options
+pub struct Config {
+    /// General settings
+    pub general: GeneralConfig,
+    
+    /// Performance settings
     pub performance: PerformanceConfig,
-    /// Cleanup options
-    pub cleanup: CleanupConfig,
+    
+    /// Security settings
+    pub security: SecurityConfig,
+    
+    /// Analysis settings
+    pub analysis: AnalysisConfig,
+    
+    /// Cleaning settings
+    pub cleaning: CleaningConfig,
+    
+    /// Scanner settings
+    pub scanner: ScannerConfig,
+    
+    /// Logging configuration
+    pub logging: LoggingConfig,
+    
+    /// Resource limits
+    pub resources: ResourceConfig,
+    
+    /// Custom settings
+    #[serde(default)]
+    pub custom: HashMap<String, String>,
 }
 
-/// Performance configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeneralConfig {
+    pub workspace_dir: PathBuf,
+    pub temp_dir: PathBuf,
+    pub max_file_size: u64,
+    pub default_timeout: Duration,
+    pub enable_metrics: bool,
+    pub enable_tracing: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceConfig {
-    /// Maximum threads
-    pub max_threads: usize,
-    /// Batch size
+    pub thread_pool_size: usize,
+    pub max_concurrent_tasks: usize,
+    pub buffer_size: usize,
+    pub cache_size_mb: u64,
     pub batch_size: usize,
-    /// Operation timeout
-    pub operation_timeout: Duration,
-    /// Memory limit (bytes)
-    pub memory_limit: u64,
-    /// Enable caching
-    pub enable_cache: bool,
+    pub io_buffer_size: usize,
 }
 
-/// Cleanup configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CleanupConfig {
-    /// Clean streams
-    pub clean_streams: bool,
-    /// Clean metadata
-    pub clean_metadata: bool,
-    /// Clean structure
-    pub clean_structure: bool,
-    /// Secure delete
+pub struct SecurityConfig {
+    pub max_memory_mb: u64,
+    pub max_disk_usage_mb: u64,
+    pub allowed_file_types: Vec<String>,
+    pub blocked_file_types: Vec<String>,
+    pub encryption_algorithm: String,
+    pub key_size: u32,
+    pub enable_sandbox: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisConfig {
+    pub deep_scan: bool,
+    pub risk_threshold: f64,
+    pub max_analysis_time: Duration,
+    pub patterns_file: PathBuf,
+    pub enable_ml: bool,
+    pub ml_model_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CleaningConfig {
+    pub backup_files: bool,
+    pub backup_dir: PathBuf,
     pub secure_delete: bool,
-    /// Compression options
-    pub compression: CompressionConfig,
+    pub wipe_passes: u32,
+    pub preserve_metadata: Vec<String>,
+    pub cleaning_rules: PathBuf,
 }
 
-/// Compression configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompressionConfig {
-    /// Enable compression
-    pub enable_compression: bool,
-    /// Compression level (0-9)
-    pub compression_level: u8,
-    /// Compression method
-    pub compression_method: CompressionMethod,
+pub struct ScannerConfig {
+    pub scan_depth: u32,
+    pub follow_symlinks: bool,
+    pub exclude_dirs: Vec<PathBuf>,
+    pub scan_timeout: Duration,
+    pub signature_db: PathBuf,
+    pub enable_yara: bool,
 }
 
-/// Compression methods
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CompressionMethod {
-    /// Deflate compression
-    Deflate,
-    /// LZW compression
-    Lzw,
-    /// Run Length encoding
-    RunLength,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    pub log_level: Level,
+    pub log_file: PathBuf,
+    pub max_log_size: u64,
+    pub max_log_files: u32,
+    pub log_format: String,
+    pub enable_syslog: bool,
 }
 
-impl Default for ProcessingConfig {
-    fn default() -> Self {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceConfig {
+    pub max_cpu_percent: f64,
+    pub max_memory_percent: f64,
+    pub max_disk_percent: f64,
+    pub io_priority: u8,
+    pub nice_value: i8,
+}
+
+/// Configuration manager for dynamic config updates
+#[derive(Debug)]
+pub struct ConfigManager {
+    config: Arc<RwLock<Config>>,
+    config_path: PathBuf,
+    watchers: Vec<ConfigWatcher>,
+}
+
+type ConfigWatcher = Box<dyn Fn(&Config) -> Result<()> + Send + Sync>;
+
+impl Config {
+    pub fn default() -> Self {
         Self {
-            input_path: PathBuf::new(),
-            output_path: PathBuf::new(),
-            verification_level: VerificationLevel::Standard,
-            user_metadata: None,
-            security_options: None,
-            performance: PerformanceConfig::default(),
-            cleanup: CleanupConfig::default(),
+            general: GeneralConfig {
+                workspace_dir: PathBuf::from("/tmp/antiforensics"),
+                temp_dir: std::env::temp_dir(),
+                max_file_size: 1024 * 1024 * 100,
+                default_timeout: Duration::from_secs(30),
+                enable_metrics: true,
+                enable_tracing: true,
+            },
+            performance: PerformanceConfig {
+                thread_pool_size: num_cpus::get(),
+                max_concurrent_tasks: 32,
+                buffer_size: 8192,
+                cache_size_mb: 1024,
+                batch_size: 1000,
+                io_buffer_size: 65536,
+            },
+            security: SecurityConfig {
+                max_memory_mb: 1024,
+                max_disk_usage_mb: 10240,
+                allowed_file_types: vec!["pdf".into(), "doc".into()],
+                blocked_file_types: vec!["exe".into(), "dll".into()],
+                encryption_algorithm: "AES-256-GCM".into(),
+                key_size: 256,
+                enable_sandbox: true,
+            },
+            analysis: AnalysisConfig {
+                deep_scan: true,
+                risk_threshold: 0.7,
+                max_analysis_time: Duration::from_secs(300),
+                patterns_file: PathBuf::from("patterns.yml"),
+                enable_ml: false,
+                ml_model_path: PathBuf::from("model.bin"),
+            },
+            cleaning: CleaningConfig {
+                backup_files: true,
+                backup_dir: PathBuf::from("backups"),
+                secure_delete: true,
+                wipe_passes: 3,
+                preserve_metadata: vec!["CreationDate".into()],
+                cleaning_rules: PathBuf::from("rules.yml"),
+            },
+            scanner: ScannerConfig {
+                scan_depth: 5,
+                follow_symlinks: false,
+                exclude_dirs: vec![],
+                scan_timeout: Duration::from_secs(3600),
+                signature_db: PathBuf::from("signatures.db"),
+                enable_yara: true,
+            },
+            logging: LoggingConfig {
+                log_level: Level::INFO,
+                log_file: PathBuf::from("antiforensics.log"),
+                max_log_size: 1024 * 1024 * 10,
+                max_log_files: 5,
+                log_format: "json".into(),
+                enable_syslog: false,
+            },
+            resources: ResourceConfig {
+                max_cpu_percent: 80.0,
+                max_memory_percent: 70.0,
+                max_disk_percent: 90.0,
+                io_priority: 4,
+                nice_value: 0,
+            },
+            custom: HashMap::new(),
         }
+    }
+
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let contents = fs::read_to_string(path)?;
+        Self::from_str(&contents)
+    }
+
+    pub fn from_str(contents: &str) -> Result<Self> {
+        serde_yaml::from_str(contents)
+            .map_err(|e| Error::Configuration(format!("Failed to parse config: {}", e)))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.validate_general()?;
+        self.validate_performance()?;
+        self.validate_security()?;
+        self.validate_resources()?;
+        Ok(())
+    }
+
+    fn validate_general(&self) -> Result<()> {
+        if !self.general.workspace_dir.exists() {
+            fs::create_dir_all(&self.general.workspace_dir)?;
+        }
+        Ok(())
+    }
+
+    fn validate_performance(&self) -> Result<()> {
+        if self.performance.thread_pool_size == 0 {
+            return Err(Error::Configuration("Thread pool size cannot be zero".into()));
+        }
+        Ok(())
+    }
+
+    fn validate_security(&self) -> Result<()> {
+        if self.security.max_memory_mb == 0 {
+            return Err(Error::Configuration("Max memory cannot be zero".into()));
+        }
+        Ok(())
+    }
+
+    fn validate_resources(&self) -> Result<()> {
+        if self.resources.max_cpu_percent > 100.0 {
+            return Err(Error::Configuration("CPU percentage cannot exceed 100".into()));
+        }
+        Ok(())
     }
 }
 
-impl Default for PerformanceConfig {
-    fn default() -> Self {
-        Self {
-            max_threads: num_cpus::get(),
-            batch_size: 1000,
-            operation_timeout: Duration::from_secs(300),
-            memory_limit: 1024 * 1024 * 1024, // 1GB
-            enable_cache: true,
-        }
-    }
-}
+impl ConfigManager {
+    pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let config = Config::from_file(&path)?;
+        config.validate()?;
 
-impl Default for CleanupConfig {
-    fn default() -> Self {
-        Self {
-            clean_streams: true,
-            clean_metadata: true,
-            clean_structure: true,
-            secure_delete: true,
-            compression: CompressionConfig::default(),
-        }
-    }
-}
-
-impl Default for CompressionConfig {
-    fn default() -> Self {
-        Self {
-            enable_compression: true,
-            compression_level: 6,
-            compression_method: CompressionMethod::Deflate,
-        }
-    }
-}
-
-impl ProcessingConfig {
-    /// Creates a new processing configuration
-    pub fn new(
-        input_path: PathBuf,
-        output_path: PathBuf,
-        verification_level: VerificationLevel,
-    ) -> Self {
-        Self {
-            input_path,
-            output_path,
-            verification_level,
-            ..Default::default()
-        }
+        Ok(Self {
+            config: Arc::new(RwLock::new(config)),
+            config_path: path.as_ref().to_path_buf(),
+            watchers: Vec::new(),
+        })
     }
 
-    /// Validates the configuration
-    pub fn validate(&self) -> crate::error::Result<()> {
-        // Validate paths
-        if !self.input_path.exists() {
-            return Err(crate::error::ForensicError::Config(
-                "Input file does not exist".to_string(),
-            ));
+    pub fn add_watcher(&mut self, watcher: ConfigWatcher) {
+        self.watchers.push(watcher);
+    }
+
+    pub async fn update(&self, new_config: Config) -> Result<()> {
+        new_config.validate()?;
+
+        for watcher in &self.watchers {
+            watcher(&new_config)?;
         }
 
-        // Validate compression level
-        if self.cleanup.compression.compression_level > 9 {
-            return Err(crate::error::ForensicError::Config(
-                "Invalid compression level".to_string(),
-            ));
-        }
-
-        // Validate performance settings
-        if self.performance.max_threads == 0 {
-            return Err(crate::error::ForensicError::Config(
-                "Max threads must be greater than 0".to_string(),
-            ));
-        }
+        let mut config = self.config.write().await;
+        *config = new_config;
 
         Ok(())
+    }
+
+    pub async fn get_config(&self) -> Arc<Config> {
+        Arc::new(self.config.read().await.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
+    use tempfile::tempdir;
 
     #[test]
     fn test_default_config() {
-        let config = ProcessingConfig::default();
-        assert_eq!(config.verification_level, VerificationLevel::Standard);
-        assert!(config.user_metadata.is_none());
-        assert!(config.security_options.is_none());
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let config = ProcessingConfig::new(
-            temp_file.path().to_path_buf(),
-            PathBuf::from("output.pdf"),
-            VerificationLevel::Standard,
-        );
+        let config = Config::default();
         assert!(config.validate().is_ok());
-
-        let invalid_config = ProcessingConfig::new(
-            PathBuf::from("nonexistent.pdf"),
-            PathBuf::from("output.pdf"),
-            VerificationLevel::Standard,
-        );
-        assert!(invalid_config.validate().is_err());
     }
 
     #[test]
-    fn test_performance_config() {
-        let config = PerformanceConfig::default();
-        assert_eq!(config.max_threads, num_cpus::get());
-        assert_eq!(config.batch_size, 1000);
-        assert!(config.enable_cache);
+    fn test_config_from_file() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.yml");
+        
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        fs::write(&config_path, yaml).unwrap();
+
+        let loaded = Config::from_file(&config_path).unwrap();
+        assert_eq!(loaded.general.max_file_size, config.general.max_file_size);
     }
 
-    #[test]
-    fn test_compression_config() {
-        let config = CompressionConfig::default();
-        assert!(config.enable_compression);
-        assert_eq!(config.compression_level, 6);
-        assert_eq!(config.compression_method, CompressionMethod::Deflate);
+    #[tokio::test]
+    async fn test_config_manager() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.yml");
+        
+        let config = Config::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        fs::write(&config_path, yaml).unwrap();
+
+        let mut manager = ConfigManager::new(&config_path).await.unwrap();
+        
+        let watcher_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watcher_called_clone = watcher_called.clone();
+        
+        manager.add_watcher(Box::new(move |_| {
+            watcher_called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+
+        let mut new_config = Config::default();
+        new_config.general.max_file_size = 200 * 1024 * 1024;
+        
+        manager.update(new_config).await.unwrap();
+        assert!(watcher_called.load(std::sync::atomic::Ordering::SeqCst));
     }
-      }
+}
