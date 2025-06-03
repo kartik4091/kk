@@ -1,450 +1,328 @@
-// Auto-generated for kartik4091/kk
-// Timestamp: 2025-06-02 05:20:34
-// User: kartik4091
-
-use async_trait::async_trait;
+use crate::{PdfError, WriterConfig};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, instrument, warn};
-use crate::core::error::PdfError;
+use lopdf::{Document, Object, ObjectId, Dictionary, Stream};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
 
-#[derive(Debug, thiserror::Error)]
-pub enum ValidationError {
-    #[error("Schema validation error: {0}")]
-    SchemaError(String),
-    
-    #[error("Content validation error: {0}")]
-    ContentError(String),
-    
-    #[error("Structure validation error: {0}")]
-    StructureError(String),
-    
-    #[error("Rule violation: {0}")]
-    RuleViolation(String),
-    
-    #[error(transparent)]
-    Storage(#[from] std::io::Error),
-    
-    #[error(transparent)]
-    Core(#[from] PdfError),
+pub struct ValidationSystem {
+    state: Arc<RwLock<ValidationState>>,
+    config: ValidationConfig,
+    rules: Vec<Box<dyn ValidationRule>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationConfig {
-    pub schema_validation: SchemaValidationConfig,
-    pub content_validation: ContentValidationConfig,
-    pub structure_validation: StructureValidationConfig,
-    pub custom_rules: Vec<CustomRule>,
+struct ValidationState {
+    validations_performed: u64,
+    last_validation: Option<DateTime<Utc>>,
+    active_validations: u32,
+    validation_results: HashMap<String, ValidationResult>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchemaValidationConfig {
-    pub version_check: bool,
-    pub required_fields: Vec<String>,
-    pub field_types: HashMap<String, String>,
-    pub max_field_length: usize,
+#[derive(Clone)]
+struct ValidationConfig {
+    max_object_size: usize,
+    max_stream_size: usize,
+    max_array_length: usize,
+    max_dict_entries: usize,
+    strict_mode: bool,
+    validate_structure: bool,
+    validate_content: bool,
+    validate_metadata: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentValidationConfig {
-    pub check_encoding: bool,
-    pub validate_images: bool,
-    pub validate_fonts: bool,
-    pub allowed_formats: Vec<String>,
+#[derive(Debug)]
+struct ValidationResult {
+    document_id: String,
+    timestamp: DateTime<Utc>,
+    errors: Vec<ValidationError>,
+    warnings: Vec<ValidationWarning>,
+    stats: ValidationStats,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructureValidationConfig {
-    pub check_references: bool,
-    pub validate_bookmarks: bool,
-    pub validate_links: bool,
-    pub max_depth: u32,
+#[derive(Debug)]
+struct ValidationError {
+    code: String,
+    message: String,
+    object_id: Option<ObjectId>,
+    severity: ErrorSeverity,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomRule {
-    pub id: String,
-    pub name: String,
-    pub severity: ValidationSeverity,
-    pub condition: String,
-    pub message: String,
+#[derive(Debug)]
+struct ValidationWarning {
+    code: String,
+    message: String,
+    object_id: Option<ObjectId>,
+    recommendation: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ValidationSeverity {
-    Error,
-    Warning,
-    Info,
+#[derive(Debug)]
+struct ValidationStats {
+    objects_validated: usize,
+    streams_validated: usize,
+    arrays_validated: usize,
+    dicts_validated: usize,
+    execution_time: std::time::Duration,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ErrorSeverity {
+    Critical,
+    Major,
+    Minor,
+}
+
+trait ValidationRule: Send + Sync {
+    fn validate(&self, doc: &Document, config: &ValidationConfig) -> Result<Vec<ValidationError>, PdfError>;
+    fn name(&self) -> &'static str;
+    fn severity(&self) -> ErrorSeverity;
+}
+
+struct StructureValidationRule;
+struct ContentValidationRule;
+struct MetadataValidationRule;
+struct ReferenceValidationRule;
+struct StreamValidationRule;
+
+impl ValidationSystem {
+    pub async fn new(config: &WriterConfig) -> Result<Self, PdfError> {
+        let mut rules: Vec<Box<dyn ValidationRule>> = Vec::new();
+        rules.push(Box::new(StructureValidationRule));
+        rules.push(Box::new(ContentValidationRule));
+        rules.push(Box::new(MetadataValidationRule));
+        rules.push(Box::new(ReferenceValidationRule));
+        rules.push(Box::new(StreamValidationRule));
+
+        Ok(Self {
+            state: Arc::new(RwLock::new(ValidationState {
+                validations_performed: 0,
+                last_validation: None,
+                active_validations: 0,
+                validation_results: HashMap::new(),
+            })),
+            config: ValidationConfig::default(),
+            rules,
+        })
+    }
+
+    pub async fn validate_document(&self, doc: &Document) -> Result<ValidationResult, PdfError> {
+        let start_time = std::time::Instant::now();
+        let current_time = Utc::parse_from_str("2025-06-02 18:53:42", "%Y-%m-%d %H:%M:%S")
+            .map_err(|_| PdfError::Validation("Invalid current time".to_string()))?;
+
+        // Update state
+        {
+            let mut state = self.state.write().map_err(|_| 
+                PdfError::Validation("Failed to acquire state lock".to_string()))?;
+            state.active_validations += 1;
+        }
+
+        let document_id = doc.get_id().unwrap_or_else(|| "unknown".to_string());
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        // Execute validation rules
+        for rule in &self.rules {
+            match rule.validate(doc, &self.config) {
+                Ok(rule_errors) => {
+                    errors.extend(rule_errors);
+                }
+                Err(e) => {
+                    errors.push(ValidationError {
+                        code: "RULE_EXECUTION_FAILED".to_string(),
+                        message: format!("Rule {} failed: {}", rule.name(), e),
+                        object_id: None,
+                        severity: rule.severity(),
+                    });
+                }
+            }
+        }
+
+        // Collect validation statistics
+        let stats = self.collect_validation_stats(doc, start_time.elapsed())?;
+
+        // Generate warnings for potential issues
+        warnings.extend(self.generate_warnings(doc)?);
+
+        let result = ValidationResult {
+            document_id: document_id.clone(),
+            timestamp: current_time,
+            errors,
+            warnings,
+            stats,
+        };
+
+        // Update state
+        {
+            let mut state = self.state.write().map_err(|_| 
+                PdfError::Validation("Failed to acquire state lock".to_string()))?;
+            state.active_validations -= 1;
+            state.validations_performed += 1;
+            state.last_validation = Some(current_time);
+            state.validation_results.insert(document_id, result.clone());
+        }
+
+        Ok(result)
+    }
+
+    fn collect_validation_stats(
+        &self,
+        doc: &Document,
+        execution_time: std::time::Duration,
+    ) -> Result<ValidationStats, PdfError> {
+        let mut stats = ValidationStats {
+            objects_validated: 0,
+            streams_validated: 0,
+            arrays_validated: 0,
+            dicts_validated: 0,
+            execution_time,
+        };
+
+        for obj in doc.objects.values() {
+            stats.objects_validated += 1;
+            match obj {
+                Object::Stream(_) => stats.streams_validated += 1,
+                Object::Array(_) => stats.arrays_validated += 1,
+                Object::Dictionary(_) => stats.dicts_validated += 1,
+                _ => (),
+            }
+        }
+
+        Ok(stats)
+    }
+
+    fn generate_warnings(&self, doc: &Document) -> Result<Vec<ValidationWarning>, PdfError> {
+        let mut warnings = Vec::new();
+
+        // Check for large objects
+        for (id, obj) in &doc.objects {
+            match obj {
+                Object::Stream(stream) if stream.content.len() > self.config.max_stream_size / 2 => {
+                    warnings.push(ValidationWarning {
+                        code: "LARGE_STREAM".to_string(),
+                        message: format!("Stream size ({} bytes) is approaching limit", stream.content.len()),
+                        object_id: Some(*id),
+                        recommendation: "Consider optimizing stream content".to_string(),
+                    });
+                }
+                Object::Array(arr) if arr.len() > self.config.max_array_length / 2 => {
+                    warnings.push(ValidationWarning {
+                        code: "LARGE_ARRAY".to_string(),
+                        message: format!("Array length ({}) is approaching limit", arr.len()),
+                        object_id: Some(*id),
+                        recommendation: "Consider splitting array into smaller parts".to_string(),
+                    });
+                }
+                _ => (),
+            }
+        }
+
+        Ok(warnings)
+    }
+}
+
+impl ValidationRule for StructureValidationRule {
+    fn validate(&self, doc: &Document, config: &ValidationConfig) -> Result<Vec<ValidationError>, PdfError> {
+        let mut errors = Vec::new();
+
+        // Validate document structure
+        if !doc.objects.contains_key(&(0, 65535)) {
+            errors.push(ValidationError {
+                code: "MISSING_HEAD".to_string(),
+                message: "Document is missing head object".to_string(),
+                object_id: None,
+                severity: ErrorSeverity::Critical,
+            });
+        }
+
+        // Validate catalog
+        if let Some(catalog_id) = doc.catalog {
+            if let Some(Object::Dictionary(dict)) = doc.objects.get(&catalog_id) {
+                if !dict.has("Type") || dict.get("Type") != Ok(&Object::Name("Catalog".to_string())) {
+                    errors.push(ValidationError {
+                        code: "INVALID_CATALOG".to_string(),
+                        message: "Invalid catalog dictionary".to_string(),
+                        object_id: Some(catalog_id),
+                        severity: ErrorSeverity::Critical,
+                    });
+                }
+            }
+        } else {
+            errors.push(ValidationError {
+                code: "MISSING_CATALOG".to_string(),
+                message: "Document is missing catalog".to_string(),
+                object_id: None,
+                severity: ErrorSeverity::Critical,
+            });
+        }
+
+        Ok(errors)
+    }
+
+    fn name(&self) -> &'static str {
+        "Structure Validation"
+    }
+
+    fn severity(&self) -> ErrorSeverity {
+        ErrorSeverity::Critical
+    }
+}
+
+impl ValidationRule for ContentValidationRule {
+    fn validate(&self, doc: &Document, config: &ValidationConfig) -> Result<Vec<ValidationError>, PdfError> {
+        let mut errors = Vec::new();
+
+        for (id, obj) in &doc.objects {
+            match obj {
+                Object::Stream(stream) => {
+                    if stream.content.len() > config.max_stream_size {
+                        errors.push(ValidationError {
+                            code: "STREAM_TOO_LARGE".to_string(),
+                            message: format!("Stream exceeds maximum size of {} bytes", config.max_stream_size),
+                            object_id: Some(*id),
+                            severity: ErrorSeverity::Major,
+                        });
+                    }
+                }
+                Object::Array(arr) => {
+                    if arr.len() > config.max_array_length {
+                        errors.push(ValidationError {
+                            code: "ARRAY_TOO_LARGE".to_string(),
+                            message: format!("Array exceeds maximum length of {} items", config.max_array_length),
+                            object_id: Some(*id),
+                            severity: ErrorSeverity::Major,
+                        });
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        Ok(errors)
+    }
+
+    fn name(&self) -> &'static str {
+        "Content Validation"
+    }
+
+    fn severity(&self) -> ErrorSeverity {
+        ErrorSeverity::Major
+    }
+}
+
+// Implementation for other validation rules...
 
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
-            schema_validation: SchemaValidationConfig {
-                version_check: true,
-                required_fields: vec!["title".to_string(), "author".to_string()],
-                field_types: HashMap::new(),
-                max_field_length: 1000,
-            },
-            content_validation: ContentValidationConfig {
-                check_encoding: true,
-                validate_images: true,
-                validate_fonts: true,
-                allowed_formats: vec![
-                    "jpeg".to_string(),
-                    "png".to_string(),
-                    "ttf".to_string(),
-                ],
-            },
-            structure_validation: StructureValidationConfig {
-                check_references: true,
-                validate_bookmarks: true,
-                validate_links: true,
-                max_depth: 10,
-            },
-            custom_rules: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ValidationManager {
-    config: ValidationConfig,
-    state: Arc<RwLock<ValidationState>>,
-    metrics: Arc<ValidationMetrics>,
-}
-
-#[derive(Debug, Default)]
-struct ValidationState {
-    validations: HashMap<String, ValidationResult>,
-    rule_cache: HashMap<String, RuleCache>,
-    active_validations: Vec<ActiveValidation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationResult {
-    id: String,
-    timestamp: DateTime<Utc>,
-    errors: Vec<ValidationIssue>,
-    warnings: Vec<ValidationIssue>,
-    info: Vec<ValidationIssue>,
-    status: ValidationStatus,
-    metrics: ValidationMetrics,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationIssue {
-    code: String,
-    message: String,
-    location: String,
-    severity: ValidationSeverity,
-    context: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ValidationStatus {
-    Success,
-    Warning,
-    Error,
-    InProgress,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleCache {
-    rule_id: String,
-    last_updated: DateTime<Utc>,
-    compiled_rule: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveValidation {
-    id: String,
-    start_time: DateTime<Utc>,
-    target: String,
-    rules_applied: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationMetrics {
-    total_issues: usize,
-    error_count: usize,
-    warning_count: usize,
-    info_count: usize,
-    duration: std::time::Duration,
-}
-
-#[derive(Debug)]
-struct ValidationMetrics {
-    validations_performed: prometheus::IntCounter,
-    validation_errors: prometheus::IntCounter,
-    validation_duration: prometheus::Histogram,
-    active_validations: prometheus::Gauge,
-}
-
-#[async_trait]
-pub trait Validator {
-    async fn validate_document(&mut self, path: &str) -> Result<ValidationResult, ValidationError>;
-    async fn validate_structure(&self, path: &str) -> Result<ValidationResult, ValidationError>;
-    async fn validate_content(&self, path: &str) -> Result<ValidationResult, ValidationError>;
-    async fn add_custom_rule(&mut self, rule: CustomRule) -> Result<(), ValidationError>;
-}
-
-impl ValidationManager {
-    pub fn new(config: ValidationConfig) -> Self {
-        let metrics = Arc::new(ValidationMetrics::new());
-        
-        Self {
-            config,
-            state: Arc::new(RwLock::new(ValidationState::default())),
-            metrics,
-        }
-    }
-
-    #[instrument(skip(self))]
-    pub async fn initialize(&self) -> Result<(), ValidationError> {
-        info!("Initializing ValidationManager");
-        Ok(())
-    }
-
-    async fn validate_schema(&self, content: &[u8]) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
-        
-        // Version check
-        if self.config.schema_validation.version_check {
-            // Check PDF version
-        }
-
-        // Required fields check
-        for field in &self.config.schema_validation.required_fields {
-            // Check if required field exists
-        }
-
-        // Field type validation
-        for (field, expected_type) in &self.config.schema_validation.field_types {
-            // Validate field type
-        }
-
-        issues
-    }
-
-    async fn validate_references(&self, content: &[u8]) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
-
-        if self.config.structure_validation.check_references {
-            // Check internal references
-        }
-
-        if self.config.structure_validation.validate_links {
-            // Validate external links
-        }
-
-        issues
-    }
-
-    async fn apply_custom_rules(&self, content: &[u8]) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
-
-        for rule in &self.config.custom_rules {
-            // Apply custom validation rule
-            // In a real implementation, this would interpret and execute the rule
-        }
-
-        issues
-    }
-}
-
-#[async_trait]
-impl Validator for ValidationManager {
-    #[instrument(skip(self))]
-    async fn validate_document(&mut self, path: &str) -> Result<ValidationResult, ValidationError> {
-        let timer = self.metrics.validation_duration.start_timer();
-        let start_time = std::time::Instant::now();
-
-        let validation_id = uuid::Uuid::new_v4().to_string();
-        
-        let mut state = self.state.write().await;
-        state.active_validations.push(ActiveValidation {
-            id: validation_id.clone(),
-            start_time: Utc::now(),
-            target: path.to_string(),
-            rules_applied: Vec::new(),
-        });
-        
-        self.metrics.active_validations.inc();
-        drop(state);
-
-        // In a real implementation, this would read the actual file content
-        let content = Vec::new();
-
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-        let mut info = Vec::new();
-
-        // Schema validation
-        let schema_issues = self.validate_schema(&content).await;
-        for issue in schema_issues {
-            match issue.severity {
-                ValidationSeverity::Error => errors.push(issue),
-                ValidationSeverity::Warning => warnings.push(issue),
-                ValidationSeverity::Info => info.push(issue),
-            }
-        }
-
-        // Structure validation
-        let structure_issues = self.validate_references(&content).await;
-        for issue in structure_issues {
-            match issue.severity {
-                ValidationSeverity::Error => errors.push(issue),
-                ValidationSeverity::Warning => warnings.push(issue),
-                ValidationSeverity::Info => info.push(issue),
-            }
-        }
-
-        // Custom rules
-        let custom_issues = self.apply_custom_rules(&content).await;
-        for issue in custom_issues {
-            match issue.severity {
-                ValidationSeverity::Error => errors.push(issue),
-                ValidationSeverity::Warning => warnings.push(issue),
-                ValidationSeverity::Info => info.push(issue),
-            }
-        }
-
-        let status = if !errors.is_empty() {
-            ValidationStatus::Error
-        } else if !warnings.is_empty() {
-            ValidationStatus::Warning
-        } else {
-            ValidationStatus::Success
-        };
-
-        let result = ValidationResult {
-            id: validation_id.clone(),
-            timestamp: Utc::now(),
-            errors: errors.clone(),
-            warnings: warnings.clone(),
-            info: info.clone(),
-            status,
-            metrics: ValidationMetrics {
-                total_issues: errors.len() + warnings.len() + info.len(),
-                error_count: errors.len(),
-                warning_count: warnings.len(),
-                info_count: info.len(),
-                duration: start_time.elapsed(),
-            },
-        };
-
-        let mut state = self.state.write().await;
-        state.validations.insert(validation_id, result.clone());
-        state.active_validations.retain(|v| v.id != validation_id);
-        
-        self.metrics.active_validations.dec();
-        self.metrics.validations_performed.inc();
-        if !errors.is_empty() {
-            self.metrics.validation_errors.inc();
-        }
-        
-        timer.observe_duration();
-
-        Ok(result)
-    }
-
-    #[instrument(skip(self))]
-    async fn validate_structure(&self, path: &str) -> Result<ValidationResult, ValidationError> {
-        let timer = self.metrics.validation_duration.start_timer();
-        let start_time = std::time::Instant::now();
-
-        // In a real implementation, this would validate document structure
-        let result = ValidationResult {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            errors: Vec::new(),
-            warnings: Vec::new(),
-            info: Vec::new(),
-            status: ValidationStatus::Success,
-            metrics: ValidationMetrics {
-                total_issues: 0,
-                error_count: 0,
-                warning_count: 0,
-                info_count: 0,
-                duration: start_time.elapsed(),
-            },
-        };
-
-        timer.observe_duration();
-        self.metrics.validations_performed.inc();
-
-        Ok(result)
-    }
-
-    #[instrument(skip(self))]
-    async fn validate_content(&self, path: &str) -> Result<ValidationResult, ValidationError> {
-        let timer = self.metrics.validation_duration.start_timer();
-        let start_time = std::time::Instant::now();
-
-        // In a real implementation, this would validate document content
-        let result = ValidationResult {
-            id: uuid::Uuid::new_v4().to_string(),
-            timestamp: Utc::now(),
-            errors: Vec::new(),
-            warnings: Vec::new(),
-            info: Vec::new(),
-            status: ValidationStatus::Success,
-            metrics: ValidationMetrics {
-                total_issues: 0,
-                error_count: 0,
-                warning_count: 0,
-                info_count: 0,
-                duration: start_time.elapsed(),
-            },
-        };
-
-        timer.observe_duration();
-        self.metrics.validations_performed.inc();
-
-        Ok(result)
-    }
-
-    #[instrument(skip(self))]
-    async fn add_custom_rule(&mut self, rule: CustomRule) -> Result<(), ValidationError> {
-        let mut state = self.state.write().await;
-        
-        // Validate rule syntax
-        // In a real implementation, this would parse and validate the rule condition
-
-        self.config.custom_rules.push(rule.clone());
-        
-        state.rule_cache.insert(rule.id.clone(), RuleCache {
-            rule_id: rule.id,
-            last_updated: Utc::now(),
-            compiled_rule: "".to_string(), // Would contain compiled rule in real implementation
-        });
-
-        Ok(())
-    }
-}
-
-impl ValidationMetrics {
-    fn new() -> Self {
-        Self {
-            validations_performed: prometheus::IntCounter::new(
-                "validation_total_validations",
-                "Total number of validations performed"
-            ).unwrap(),
-            validation_errors: prometheus::IntCounter::new(
-                "validation_total_errors",
-                "Total number of validation errors"
-            ).unwrap(),
-            validation_duration: prometheus::Histogram::new(
-                "validation_duration_seconds",
-                "Time taken for validation operations"
-            ).unwrap(),
-            active_validations: prometheus::Gauge::new(
-                "validation_active_count",
-                "Number of currently active validations"
-            ).unwrap(),
+            max_object_size: 50 * 1024 * 1024, // 50MB
+            max_stream_size: 100 * 1024 * 1024, // 100MB
+            max_array_length: 1_000_000,
+            max_dict_entries: 1_000,
+            strict_mode: true,
+            validate_structure: true,
+            validate_content: true,
+            validate_metadata: true,
         }
     }
 }
@@ -454,30 +332,34 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn test_validation_system_creation() {
+        let config = WriterConfig::default();
+        let system = ValidationSystem::new(&config).await;
+        assert!(system.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_document_validation() {
-        let mut manager = ValidationManager::new(ValidationConfig::default());
+        let config = WriterConfig::default();
+        let system = ValidationSystem::new(&config).await.unwrap();
+        
+        let doc = Document::new();
+        let result = system.validate_document(&doc).await;
+        assert!(result.is_ok());
+        
+        let validation = result.unwrap();
+        assert!(!validation.errors.is_empty()); // Should have at least catalog error
+    }
 
-        // Test document validation
-        let result = manager.validate_document("/test/document.pdf").await.unwrap();
-        assert!(matches!(result.status, ValidationStatus::Success));
-
-        // Test custom rule
-        let custom_rule = CustomRule {
-            id: "rule-1".to_string(),
-            name: "Test Rule".to_string(),
-            severity: ValidationSeverity::Warning,
-            condition: "length > 0".to_string(),
-            message: "Test condition".to_string(),
-        };
-
-        assert!(manager.add_custom_rule(custom_rule).await.is_ok());
-
-        // Test structure validation
-        let structure_result = manager.validate_structure("/test/document.pdf").await.unwrap();
-        assert!(matches!(structure_result.status, ValidationStatus::Success));
-
-        // Test content validation
-        let content_result = manager.validate_content("/test/document.pdf").await.unwrap();
-        assert!(matches!(content_result.status, ValidationStatus::Success));
+    #[tokio::test]
+    async fn test_structure_validation() {
+        let config = WriterConfig::default();
+        let system = ValidationSystem::new(&config).await.unwrap();
+        
+        let mut doc = Document::new();
+        doc.objects.insert((0, 65535), Object::Null);
+        
+        let result = system.validate_document(&doc).await;
+        assert!(result.is_ok());
     }
 }
