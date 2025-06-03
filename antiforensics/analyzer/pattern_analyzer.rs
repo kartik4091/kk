@@ -1,8 +1,8 @@
-//! Pattern analyser for PDF document analysis
+//! Pattern analyzer implementation for PDF document analysis
 //! Author: kartik4091
-//! Created: 2025-06-03 04:45:32 UTC
-//! This module provides pattern analysis capabilities for PDF documents,
-//! including regex pattern matching, byte sequence analysis, and entropy analysis.
+//! Created: 2025-06-03 06:43:59 UTC
+//! This module provides pattern matching and analysis capabilities for PDF documents,
+//! detecting specific patterns that may indicate security risks or forensic artifacts.
 
 use std::{
     sync::Arc,
@@ -10,307 +10,321 @@ use std::{
     time::{Duration, Instant},
 };
 use async_trait::async_trait;
-use regex::bytes::{RegexSet, RegexSetBuilder};
+use serde::{Serialize, Deserialize};
 use tracing::{info, warn, error, debug, trace, instrument};
+use regex::Regex;
 
-use super::AnalyserConfig;
+use super::{Analyzer, AnalyzerConfig, AnalysisResult, AnalyzerMetrics, BaseAnalyzer};
 use crate::antiforensics::{
     Document,
     PdfError,
     RiskLevel,
     ForensicArtifact,
     ArtifactType,
+    ScanResult,
 };
 
-/// Pattern analyser implementation
-pub struct PatternAnalyser {
-    /// Analyser configuration
-    config: Arc<AnalyserConfig>,
-    /// Compiled regex patterns
-    patterns: RegexSet,
-    /// Pattern metadata
-    pattern_metadata: HashMap<usize, PatternMetadata>,
-    /// Entropy thresholds
-    entropy_thresholds: EntropyThresholds,
-}
-
-/// Pattern metadata
-#[derive(Debug, Clone)]
-struct PatternMetadata {
-    /// Pattern identifier
-    id: String,
+/// Pattern definition for matching forensic artifacts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pattern {
+    /// Unique identifier for the pattern
+    pub id: String,
+    /// Pattern name
+    pub name: String,
     /// Pattern description
-    description: String,
-    /// Risk level
-    risk_level: RiskLevel,
+    pub description: String,
+    /// Regular expression pattern
+    pub regex: String,
     /// Pattern category
-    category: String,
-    /// Context size
-    context_size: usize,
+    pub category: PatternCategory,
+    /// Associated risk level
+    pub risk_level: RiskLevel,
+    /// Detection context requirements
+    pub context: Vec<PatternContext>,
+    /// False positive probability
+    pub false_positive_rate: f64,
+    /// Pattern version
+    pub version: String,
+    /// Last updated timestamp
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Pattern metadata
+    pub metadata: HashMap<String, String>,
 }
 
-/// Entropy thresholds
-#[derive(Debug, Clone)]
-struct EntropyThresholds {
-    /// Low entropy threshold
-    low: f64,
-    /// Medium entropy threshold
-    medium: f64,
-    /// High entropy threshold
-    high: f64,
+/// Categories of patterns to match
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PatternCategory {
+    /// Metadata patterns
+    Metadata,
+    /// Content patterns
+    Content,
+    /// Structure patterns
+    Structure,
+    /// JavaScript patterns
+    JavaScript,
+    /// Binary patterns
+    Binary,
+    /// Custom patterns
+    Custom(String),
 }
 
-impl PatternAnalyser {
-    /// Creates a new pattern analyser instance
+/// Context for pattern matching
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PatternContext {
+    /// Global document context
+    Global,
+    /// Object-specific context
+    Object(String),
+    /// Stream context
+    Stream,
+    /// Resource context
+    Resource(String),
+}
+
+/// Pattern analyzer implementation
+pub struct PatternAnalyzer {
+    /// Base analyzer implementation
+    base: BaseAnalyzer,
+    /// Compiled patterns
+    patterns: Arc<Vec<(Pattern, Regex)>>,
+    /// Pattern categories
+    categories: Arc<HashSet<PatternCategory>>,
+    /// Last pattern update
+    last_update: Arc<RwLock<chrono::DateTime<chrono::Utc>>>,
+}
+
+impl PatternAnalyzer {
+    /// Creates a new pattern analyzer instance
     #[instrument(skip(config))]
-    pub fn new(config: AnalyserConfig) -> Self {
-        debug!("Initializing PatternAnalyser");
+    pub async fn new(config: AnalyzerConfig) -> Result<Self, PdfError> {
+        debug!("Initializing PatternAnalyzer");
+        
+        // Load and compile patterns
+        let patterns = Self::load_patterns(&config)?;
+        let categories = Self::extract_categories(&patterns);
 
-        let (patterns, metadata) = Self::compile_patterns();
-
-        Self {
-            config: Arc::new(config),
-            patterns,
-            pattern_metadata: metadata,
-            entropy_thresholds: EntropyThresholds {
-                low: 3.0,
-                medium: 5.0,
-                high: 7.0,
-            },
-        }
+        Ok(Self {
+            base: BaseAnalyzer::new(config),
+            patterns: Arc::new(patterns),
+            categories: Arc::new(categories),
+            last_update: Arc::new(RwLock::new(chrono::Utc::now())),
+        })
     }
 
-    /// Analyzes patterns in a document
-    #[instrument(skip(self, doc, existing_artifacts), err(Display))]
-    pub async fn analyze(
-        &self,
-        doc: &Document,
-        existing_artifacts: &[ForensicArtifact],
-    ) -> Result<Vec<ForensicArtifact>, PdfError> {
-        let mut artifacts = Vec::new();
+    /// Loads and compiles patterns
+    fn load_patterns(config: &AnalyzerConfig) -> Result<Vec<(Pattern, Regex)>, PdfError> {
+        let mut patterns = vec![
+            // Metadata patterns
+            Pattern {
+                id: "PAT001".into(),
+                name: "Author Information".into(),
+                description: "Author metadata detection".into(),
+                regex: r"(?i)/Author\s*\(([^)]+)\)".into(),
+                category: PatternCategory::Metadata,
+                risk_level: RiskLevel::Low,
+                context: vec![PatternContext::Global],
+                false_positive_rate: 0.01,
+                version: "1.0".into(),
+                updated_at: chrono::Utc::now(),
+                metadata: HashMap::new(),
+            },
+            // JavaScript patterns
+            Pattern {
+                id: "PAT002".into(),
+                name: "JavaScript Execution".into(),
+                description: "JavaScript code execution detection".into(),
+                regex: r"(?i)/JS\s*<<.*?>>".into(),
+                category: PatternCategory::JavaScript,
+                risk_level: RiskLevel::High,
+                context: vec![PatternContext::Stream],
+                false_positive_rate: 0.001,
+                version: "1.0".into(),
+                updated_at: chrono::Utc::now(),
+                metadata: HashMap::new(),
+            },
+            // Structure patterns
+            Pattern {
+                id: "PAT003".into(),
+                name: "Hidden Content".into(),
+                description: "Hidden or invisible content detection".into(),
+                regex: r"/Type\s*/Annot.*?/F\s*\d+".into(),
+                category: PatternCategory::Structure,
+                risk_level: RiskLevel::Medium,
+                context: vec![PatternContext::Object("Annot".into())],
+                false_positive_rate: 0.05,
+                version: "1.0".into(),
+                updated_at: chrono::Utc::now(),
+                metadata: HashMap::new(),
+            },
+        ];
 
-        // Analyze document content
-        let content = doc.get_raw_content()?;
-        
-        // Find pattern matches
-        let matches = self.find_patterns(&content)?;
-        
-        // Convert matches to artifacts
-        for (pattern_idx, locations) in matches {
-            if let Some(metadata) = self.pattern_metadata.get(&pattern_idx) {
-                for location in locations {
-                    // Extract context around match
-                    let context = self.extract_context(&content, location, metadata.context_size);
-                    
-                    // Calculate entropy for the matched region
-                    let entropy = self.calculate_entropy(&context);
-                    
-                    // Create artifact metadata
-                    let mut artifact_metadata = HashMap::new();
-                    artifact_metadata.insert("offset".into(), location.to_string());
-                    artifact_metadata.insert("length".into(), context.len().to_string());
-                    artifact_metadata.insert("entropy".into(), entropy.to_string());
-                    artifact_metadata.insert("category".into(), metadata.category.clone());
-                    
-                    // Create artifact
-                    artifacts.push(ForensicArtifact {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        artifact_type: ArtifactType::Pattern,
-                        location: format!("pattern_match:{}", location),
-                        description: format!("{} (Entropy: {:.2})", metadata.description, entropy),
-                        risk_level: self.adjust_risk_level(metadata.risk_level, entropy),
-                        remediation: self.generate_remediation(metadata, entropy),
-                        metadata: artifact_metadata,
-                        detection_timestamp: chrono::Utc::now(),
-                        hash: self.calculate_hash(&context),
-                    });
-                }
-            }
+        // Load custom patterns if provided
+        if let Some(custom_rules) = &config.custom_rules {
+            let custom_patterns: Vec<Pattern> = serde_yaml::from_str(custom_rules)
+                .map_err(|e| PdfError::Config(format!("Invalid custom patterns: {}", e)))?;
+            patterns.extend(custom_patterns);
         }
 
-        // Correlate with existing artifacts
-        self.correlate_artifacts(&mut artifacts, existing_artifacts);
+        // Compile regular expressions
+        patterns.into_iter()
+            .map(|p| {
+                let regex = Regex::new(&p.regex)
+                    .map_err(|e| PdfError::Pattern(format!("Invalid pattern {}: {}", p.id, e)))?;
+                Ok((p, regex))
+            })
+            .collect::<Result<Vec<_>, PdfError>>()
+    }
+
+    /// Extracts unique pattern categories
+    fn extract_categories(patterns: &[(Pattern, Regex)]) -> HashSet<PatternCategory> {
+        patterns.iter()
+            .map(|(p, _)| p.category.clone())
+            .collect()
+    }
+
+    /// Analyzes document content with patterns
+    async fn analyze_with_patterns(
+        &self,
+        doc: &Document,
+        scan_result: &ScanResult,
+    ) -> Result<Vec<ForensicArtifact>, PdfError> {
+        let mut artifacts = Vec::new();
+        let content = doc.get_content()?;
+
+        for (pattern, regex) in self.patterns.iter() {
+            trace!("Applying pattern: {}", pattern.id);
+            
+            for capture in regex.captures_iter(&content) {
+                let location = capture[0].to_string();
+                
+                // Skip if context doesn't match
+                if !self.validate_context(doc, &pattern.context, &location)? {
+                    continue;
+                }
+
+                artifacts.push(ForensicArtifact {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    artifact_type: match pattern.category {
+                        PatternCategory::Metadata => ArtifactType::Metadata,
+                        PatternCategory::JavaScript => ArtifactType::JavaScript,
+                        PatternCategory::Binary => ArtifactType::Binary,
+                        _ => ArtifactType::Custom(pattern.category.to_string()),
+                    },
+                    location,
+                    description: pattern.description.clone(),
+                    risk_level: pattern.risk_level,
+                    remediation: format!("Remove or sanitize the detected pattern: {}", pattern.name),
+                    metadata: {
+                        let mut m = HashMap::new();
+                        m.insert("pattern_id".into(), pattern.id.clone());
+                        m.insert("pattern_version".into(), pattern.version.clone());
+                        m.extend(pattern.metadata.clone());
+                        m
+                    },
+                    detection_timestamp: chrono::Utc::now(),
+                    hash: self.calculate_artifact_hash(&capture[0]),
+                });
+            }
+        }
 
         Ok(artifacts)
     }
 
-    /// Compiles regex patterns and their metadata
-    fn compile_patterns() -> (RegexSet, HashMap<usize, PatternMetadata>) {
-        let mut patterns = Vec::new();
-        let mut metadata = HashMap::new();
-
-        // Shellcode patterns
-        patterns.push(r"(?-u)\x90{20,}"); // NOP sled
-        metadata.insert(0, PatternMetadata {
-            id: "PATTERN-001".into(),
-            description: "NOP sled detected".into(),
-            risk_level: RiskLevel::Critical,
-            category: "shellcode".into(),
-            context_size: 100,
-        });
-
-        // Encoded content patterns
-        patterns.push(r"base64:[a-zA-Z0-9+/]{20,}={0,2}");
-        metadata.insert(1, PatternMetadata {
-            id: "PATTERN-002".into(),
-            description: "Base64 encoded content detected".into(),
-            risk_level: RiskLevel::Medium,
-            category: "encoding".into(),
-            context_size: 200,
-        });
-
-        // Obfuscated JavaScript patterns
-        patterns.push(r"eval\s*\(|String\.fromCharCode|unescape\s*\(");
-        metadata.insert(2, PatternMetadata {
-            id: "PATTERN-003".into(),
-            description: "Potentially obfuscated JavaScript detected".into(),
-            risk_level: RiskLevel::High,
-            category: "obfuscation".into(),
-            context_size: 150,
-        });
-
-        // URL patterns
-        patterns.push(r"https?://[^\s/$.?#].[^\s]*");
-        metadata.insert(3, PatternMetadata {
-            id: "PATTERN-004".into(),
-            description: "URL detected".into(),
-            risk_level: RiskLevel::Low,
-            category: "network".into(),
-            context_size: 100,
-        });
-
-        // Command injection patterns
-        patterns.push(r"system\s*\(|exec\s*\(|spawn\s*\(");
-        metadata.insert(4, PatternMetadata {
-            id: "PATTERN-005".into(),
-            description: "Potential command injection detected".into(),
-            risk_level: RiskLevel::Critical,
-            category: "injection".into(),
-            context_size: 150,
-        });
-
-        let regex_set = RegexSetBuilder::new(patterns)
-            .case_insensitive(true)
-            .dot_matches_new_line(true)
-            .build()
-            .expect("Failed to compile regex patterns");
-
-        (regex_set, metadata)
-    }
-
-    /// Finds pattern matches in content
-    fn find_patterns(&self, content: &[u8]) -> Result<HashMap<usize, Vec<usize>>, PdfError> {
-        let mut matches = HashMap::new();
-        
-        // Find all matches for each pattern
-        for pattern_idx in self.patterns.matches(content).iter() {
-            let pattern = self.patterns.patterns()[pattern_idx];
-            
-            // Find all occurrences of the pattern
-            if let Ok(regex) = regex::bytes::Regex::new(pattern) {
-                let locations: Vec<usize> = regex.find_iter(content)
-                    .map(|m| m.start())
-                    .collect();
-                
-                if !locations.is_empty() {
-                    matches.insert(pattern_idx, locations);
-                }
-            }
-        }
-
-        Ok(matches)
-    }
-
-    /// Extracts context around a match
-    fn extract_context(&self, content: &[u8], location: usize, context_size: usize) -> Vec<u8> {
-        let start = location.saturating_sub(context_size);
-        let end = (location + context_size).min(content.len());
-        content[start..end].to_vec()
-    }
-
-    /// Calculates entropy of a byte sequence
-    fn calculate_entropy(&self, data: &[u8]) -> f64 {
-        let mut frequencies = [0.0f64; 256];
-        let len = data.len() as f64;
-
-        // Calculate byte frequencies
-        for &byte in data {
-            frequencies[byte as usize] += 1.0;
-        }
-
-        // Calculate entropy
-        -frequencies.iter()
-            .filter(|&&freq| freq > 0.0)
-            .map(|&freq| {
-                let p = freq / len;
-                p * p.log2()
-            })
-            .sum::<f64>()
-    }
-
-    /// Adjusts risk level based on entropy
-    fn adjust_risk_level(&self, base_level: RiskLevel, entropy: f64) -> RiskLevel {
-        match (base_level, entropy) {
-            (RiskLevel::Low, e) if e > self.entropy_thresholds.high => RiskLevel::Medium,
-            (RiskLevel::Medium, e) if e > self.entropy_thresholds.high => RiskLevel::High,
-            (RiskLevel::High, e) if e > self.entropy_thresholds.high => RiskLevel::Critical,
-            (level, _) => level,
-        }
-    }
-
-    /// Generates remediation advice
-    fn generate_remediation(&self, metadata: &PatternMetadata, entropy: f64) -> String {
-        match (metadata.category.as_str(), entropy) {
-            ("shellcode", _) => "Remove shellcode and review code execution vectors".into(),
-            ("encoding", e) if e > self.entropy_thresholds.high => 
-                "Decode and review high-entropy encoded content".into(),
-            ("encoding", _) => "Review encoded content for sensitive information".into(),
-            ("obfuscation", _) => "Deobfuscate and review JavaScript code".into(),
-            ("network", _) => "Validate and review network endpoints".into(),
-            ("injection", _) => "Remove command injection vectors and sanitize inputs".into(),
-            (_, _) => "Review and validate suspicious pattern".into(),
-        }
-    }
-
-    /// Correlates pattern artifacts with existing artifacts
-    fn correlate_artifacts(
+    /// Validates pattern context against document
+    fn validate_context(
         &self,
-        pattern_artifacts: &mut Vec<ForensicArtifact>,
-        existing_artifacts: &[ForensicArtifact],
-    ) {
-        for pattern_artifact in pattern_artifacts.iter_mut() {
-            // Find related artifacts within the same region
-            let pattern_offset = pattern_artifact.metadata.get("offset")
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-
-            for existing in existing_artifacts {
-                if let Some(existing_offset) = existing.metadata.get("offset")
-                    .and_then(|s| s.parse::<usize>().ok())
-                {
-                    // Check if artifacts are within proximity
-                    if (pattern_offset as i64 - existing_offset as i64).abs() < 100 {
-                        pattern_artifact.metadata.insert(
-                            format!("related_artifact_{}", existing.id),
-                            existing.description.clone(),
-                        );
-
-                        // Escalate risk level if related artifact has higher risk
-                        if existing.risk_level > pattern_artifact.risk_level {
-                            pattern_artifact.risk_level = existing.risk_level;
-                        }
+        doc: &Document,
+        contexts: &[PatternContext],
+        location: &str,
+    ) -> Result<bool, PdfError> {
+        for context in contexts {
+            match context {
+                PatternContext::Global => return Ok(true),
+                PatternContext::Object(obj_type) => {
+                    if !doc.has_object_type(obj_type, location)? {
+                        return Ok(false);
                     }
-                }
+                },
+                PatternContext::Stream => {
+                    if !doc.is_in_stream(location)? {
+                        return Ok(false);
+                    }
+                },
+                PatternContext::Resource(res_type) => {
+                    if !doc.has_resource_type(res_type, location)? {
+                        return Ok(false);
+                    }
+                },
             }
         }
+        Ok(true)
     }
 
-    /// Calculates hash of pattern context
-    fn calculate_hash(&self, data: &[u8]) -> String {
+    /// Calculates hash for forensic artifacts
+    fn calculate_artifact_hash(&self, content: &str) -> String {
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
-        hasher.update(data);
+        hasher.update(content.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+}
+
+#[async_trait]
+impl Analyzer for PatternAnalyzer {
+    #[instrument(skip(self, doc, scan_result), err(Display))]
+    async fn analyze(&self, doc: &Document, scan_result: &ScanResult) -> Result<AnalysisResult, PdfError> {
+        let start_time = Instant::now();
+        
+        // Check cache first
+        let cache_key = self.base.generate_cache_key(doc);
+        if let Some(cached_result) = self.base.cache.write().await.get(&cache_key) {
+            debug!("Cache hit for pattern analysis");
+            return Ok(cached_result);
+        }
+
+        debug!("Starting pattern analysis");
+        let artifacts = self.analyze_with_patterns(doc, scan_result).await?;
+
+        let duration = start_time.elapsed();
+        let result = AnalysisResult {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now(),
+            risk_level: self.calculate_risk_level(&artifacts),
+            artifacts,
+            recommendations: self.generate_recommendations(),
+            duration,
+            metadata: {
+                let mut m = HashMap::new();
+                m.insert("analyzer_version".into(), env!("CARGO_PKG_VERSION").into());
+                m.insert("patterns_analyzed".into(), self.patterns.len().to_string());
+                m.insert("last_pattern_update".into(), 
+                    self.last_update.read().await.to_rfc3339());
+                m
+            },
+            confidence: 1.0 - self.patterns.iter()
+                .map(|(p, _)| p.false_positive_rate)
+                .sum::<f64>() / self.patterns.len() as f64,
+        };
+
+        // Cache the result
+        self.base.cache.write().await.put(
+            cache_key,
+            result.clone(),
+            Duration::from_secs(3600)
+        );
+
+        // Update metrics
+        self.base.update_metrics(duration, true).await;
+
+        Ok(result)
+    }
+
+    async fn get_metrics(&self) -> AnalyzerMetrics {
+        self.base.metrics.read().await.clone()
+    }
+
+    fn validate_result(&self, result: &AnalysisResult) -> bool {
+        result.confidence >= self.base.config.min_confidence
     }
 }
 
@@ -320,57 +334,57 @@ mod tests {
     use tokio::test;
 
     #[test]
-    async fn test_pattern_detection() {
-        let analyser = PatternAnalyser::new(AnalyserConfig::default());
-        let mut doc = Document::new();
-        doc.add_content(b"eval('alert(1)')");
+    async fn test_pattern_analyzer_creation() {
+        let config = AnalyzerConfig::default();
+        let analyzer = PatternAnalyzer::new(config).await;
+        assert!(analyzer.is_ok());
+    }
+
+    #[test]
+    async fn test_custom_pattern_loading() {
+        let config = AnalyzerConfig {
+            custom_rules: Some(r#"
+                - id: "CUSTOM001"
+                  name: "Custom Pattern"
+                  description: "Custom pattern test"
+                  regex: "test"
+                  category: "Custom"
+                  risk_level: "High"
+                  context: ["Global"]
+                  false_positive_rate: 0.1
+                  version: "1.0"
+                  updated_at: "2025-06-03T06:43:59Z"
+                  metadata: {}
+            "#.into()),
+            ..AnalyzerConfig::default()
+        };
+
+        let analyzer = PatternAnalyzer::new(config).await.unwrap();
+        assert!(analyzer.patterns.len() > 3); // Base patterns + custom pattern
+    }
+
+    #[test]
+    async fn test_pattern_context_validation() {
+        let analyzer = PatternAnalyzer::new(AnalyzerConfig::default()).await.unwrap();
+        let doc = Document::new(); // Mock document
         
-        let artifacts = analyser.analyze(&doc, &[]).await.unwrap();
+        assert!(analyzer.validate_context(
+            &doc,
+            &[PatternContext::Global],
+            "test"
+        ).unwrap());
+    }
+
+    #[test]
+    async fn test_artifact_generation() {
+        let analyzer = PatternAnalyzer::new(AnalyzerConfig::default()).await.unwrap();
+        let doc = Document::new(); // Mock document with JavaScript content
+        doc.set_content("/JS << /S /JavaScript /JS (alert(1)) >>").unwrap();
+        
+        let scan_result = ScanResult::default();
+        let artifacts = analyzer.analyze_with_patterns(&doc, &scan_result).await.unwrap();
+        
         assert!(!artifacts.is_empty());
-        assert_eq!(artifacts[0].risk_level, RiskLevel::High);
+        assert_eq!(artifacts[0].artifact_type, ArtifactType::JavaScript);
     }
-
-    #[test]
-    async fn test_entropy_calculation() {
-        let analyser = PatternAnalyser::new(AnalyserConfig::default());
-        
-        let low_entropy = b"AAAAAAAAAA";
-        let high_entropy = b"1X#m9k*P3q";
-        
-        let low_score = analyser.calculate_entropy(low_entropy);
-        let high_score = analyser.calculate_entropy(high_entropy);
-        
-        assert!(low_score < high_score);
-    }
-
-    #[test]
-    async fn test_pattern_correlation() {
-        let analyser = PatternAnalyser::new(AnalyserConfig::default());
-        let mut doc = Document::new();
-        doc.add_content(b"eval('alert(1)')");
-        
-        let existing_artifacts = vec![
-            ForensicArtifact {
-                risk_level: RiskLevel::Critical,
-                metadata: {
-                    let mut m = HashMap::new();
-                    m.insert("offset".into(), "0".into());
-                    m
-                },
-                ..Default::default()
-            },
-        ];
-
-        let mut artifacts = analyser.analyze(&doc, &existing_artifacts).await.unwrap();
-        assert_eq!(artifacts[0].risk_level, RiskLevel::Critical);
-    }
-
-    #[test]
-    async fn test_context_extraction() {
-        let analyser = PatternAnalyser::new(AnalyserConfig::default());
-        let content = b"prefix_eval('alert(1)')_suffix";
-        
-        let context = analyser.extract_context(content, 7, 5);
-        assert_eq!(context.len(), 11);
-    }
-                                             }
+}
