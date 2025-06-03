@@ -1,6 +1,6 @@
-//! Cross-reference table analysis and validation
+//! PDF Version Analysis and Validation
 //! Author: kartik4091
-//! Created: 2025-06-03 10:41:13 UTC
+//! Created: 2025-06-03 10:37:10 UTC
 
 use std::{
     sync::Arc,
@@ -9,11 +9,10 @@ use std::{
 };
 use tokio::{
     sync::{RwLock, Semaphore, broadcast},
-    io::{AsyncRead, AsyncSeek, AsyncReadExt, AsyncSeekExt},
+    io::{AsyncRead, AsyncSeek, AsyncReadExt},
 };
 use tracing::{info, warn, error, debug, instrument};
 use serde::{Serialize, Deserialize};
-use dashmap::DashMap;
 
 use crate::{
     error::{Result, ForensicError, StructureError},
@@ -21,74 +20,32 @@ use crate::{
     types::{ProcessingStage, RiskLevel},
 };
 
+/// PDF version analysis state
+#[derive(Debug)]
+struct VersionState {
+    /// Active analyses
+    active_analyses: usize,
+    /// Analysis results
+    analysis_results: HashMap<String, VersionAnalysis>,
+    /// Analysis history
+    analysis_history: Vec<AnalysisRecord>,
+    /// Start time
+    start_time: Instant,
+}
+
+/// PDF version analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct XrefEntry {
-    /// Object number
-    pub object_number: u32,
-    /// Generation number
-    pub generation_number: u16,
-    /// Entry type (in-use, free, or compressed)
-    pub entry_type: XrefEntryType,
-    /// Offset in file or object stream number
-    pub offset: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum XrefEntryType {
-    /// In-use object
-    InUse,
-    /// Free object
-    Free,
-    /// Compressed object in object stream
-    Compressed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct XrefTable {
-    /// Starting offset in file
-    pub offset: u64,
-    /// Total entries
-    pub total_entries: usize,
-    /// Subsections
-    pub subsections: Vec<XrefSubsection>,
-    /// Table type
-    pub table_type: XrefTableType,
-    /// Validation status
-    pub is_valid: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct XrefSubsection {
-    /// First object number
-    pub first_object: u32,
-    /// Entry count
-    pub count: usize,
-    /// Entries
-    pub entries: Vec<XrefEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum XrefTableType {
-    /// Regular cross-reference table
-    Regular,
-    /// Cross-reference stream
-    Stream,
-    /// Hybrid (both table and stream)
-    Hybrid,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct XrefAnalysis {
+pub struct VersionAnalysis {
     /// Document ID
     pub document_id: String,
-    /// Cross-reference tables
-    pub xref_tables: Vec<XrefTable>,
-    /// Missing objects
-    pub missing_objects: HashSet<u32>,
-    /// Duplicate objects
-    pub duplicate_objects: Vec<(u32, u32)>,
-    /// Invalid entries
-    pub invalid_entries: Vec<InvalidEntry>,
+    /// Header version
+    pub header_version: PdfVersion,
+    /// Catalog version
+    pub catalog_version: Option<PdfVersion>,
+    /// Version mismatches
+    pub version_mismatches: Vec<VersionMismatch>,
+    /// Feature compatibility
+    pub feature_compatibility: FeatureCompatibility,
     /// Risk assessment
     pub risk_assessment: RiskAssessment,
     /// Analysis timestamp
@@ -97,90 +54,120 @@ pub struct XrefAnalysis {
     pub duration: Duration,
 }
 
+/// PDF version information
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PdfVersion {
+    /// Major version
+    pub major: u8,
+    /// Minor version
+    pub minor: u8,
+    /// Extension level
+    pub extension_level: Option<u8>,
+}
+
+/// Version mismatch information
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InvalidEntry {
-    /// Entry location
-    pub location: XrefLocation,
-    /// Error type
-    pub error_type: XrefErrorType,
+pub struct VersionMismatch {
+    /// Mismatch type
+    pub mismatch_type: MismatchType,
+    /// Expected version
+    pub expected_version: PdfVersion,
+    /// Actual version
+    pub actual_version: PdfVersion,
+    /// Location
+    pub location: String,
+    /// Risk level
+    pub risk_level: RiskLevel,
+}
+
+/// Version mismatch type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MismatchType {
+    /// Header vs catalog version mismatch
+    HeaderCatalogMismatch,
+    /// Feature compatibility mismatch
+    FeatureCompatibilityMismatch,
+    /// Extension level mismatch
+    ExtensionLevelMismatch,
+}
+
+/// Feature compatibility information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureCompatibility {
+    /// Required features
+    pub required_features: HashSet<PdfFeature>,
+    /// Optional features
+    pub optional_features: HashSet<PdfFeature>,
+    /// Incompatible features
+    pub incompatible_features: Vec<FeatureIncompatibility>,
+}
+
+/// PDF feature
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PdfFeature {
+    /// Transparency
+    Transparency,
+    /// Optional content
+    OptionalContent,
+    /// 3D content
+    ThreeDContent,
+    /// Multimedia
+    Multimedia,
+    /// Digital signatures
+    DigitalSignatures,
+    /// Tagged PDF
+    TaggedPdf,
+    /// Custom feature
+    Custom(String),
+}
+
+/// Feature incompatibility
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureIncompatibility {
+    /// Feature
+    pub feature: PdfFeature,
+    /// Required version
+    pub required_version: PdfVersion,
     /// Description
     pub description: String,
     /// Risk level
     pub risk_level: RiskLevel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct XrefLocation {
-    /// Table offset
-    pub table_offset: u64,
-    /// Subsection index
-    pub subsection_index: usize,
-    /// Entry index
-    pub entry_index: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum XrefErrorType {
-    /// Invalid offset
-    InvalidOffset,
-    /// Invalid generation number
-    InvalidGeneration,
-    /// Invalid object number
-    InvalidObjectNumber,
-    /// Circular reference
-    CircularReference,
-    /// Inconsistent state
-    InconsistentState,
-}
-
+/// Risk assessment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskAssessment {
     /// Overall risk level
     pub risk_level: RiskLevel,
     /// Risk factors
     pub risk_factors: Vec<RiskFactor>,
-    /// Recommendations
-    pub recommendations: Vec<String>,
+    /// Remediation suggestions
+    pub remediation: Vec<String>,
 }
 
+/// Risk factor
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskFactor {
     /// Factor type
-    pub factor_type: XrefRiskType,
+    pub factor_type: RiskFactorType,
     /// Description
     pub description: String,
     /// Risk level
     pub risk_level: RiskLevel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum XrefRiskType {
-    /// Missing objects
-    MissingObjects,
-    /// Duplicate objects
-    DuplicateObjects,
-    /// Invalid offsets
-    InvalidOffsets,
-    /// Inconsistent state
-    InconsistentState,
-    /// Circular references
-    CircularReferences,
+/// Risk factor type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RiskFactorType {
+    /// Version inconsistency
+    VersionInconsistency,
+    /// Feature incompatibility
+    FeatureIncompatibility,
+    /// Extension level issue
+    ExtensionLevelIssue,
 }
 
-#[derive(Debug)]
-struct XrefState {
-    /// Active analyses
-    active_analyses: usize,
-    /// Analysis results
-    analysis_results: DashMap<String, XrefAnalysis>,
-    /// Analysis history
-    analysis_history: Vec<AnalysisRecord>,
-    /// Start time
-    start_time: Instant,
-    /// Total bytes analyzed
-    bytes_analyzed: u64,
-}
-
+/// Analysis record for history tracking
 #[derive(Debug)]
 struct AnalysisRecord {
     /// Document ID
@@ -189,16 +176,17 @@ struct AnalysisRecord {
     start_time: Instant,
     /// Duration
     duration: Duration,
-    /// Tables analyzed
-    tables_analyzed: usize,
+    /// Version found
+    version: PdfVersion,
     /// Issues found
     issues_found: usize,
     /// Success status
     success: bool,
 }
 
+/// Version handler configuration
 #[derive(Debug, Clone)]
-pub struct XrefConfig {
+pub struct VersionConfig {
     /// Maximum concurrent analyses
     pub max_concurrent: usize,
     /// Operation timeout
@@ -207,60 +195,58 @@ pub struct XrefConfig {
     pub enable_cache: bool,
     /// Deep analysis
     pub deep_analysis: bool,
-    /// Validate offsets
-    pub validate_offsets: bool,
-    /// Check for duplicates
-    pub check_duplicates: bool,
+    /// Strict mode
+    pub strict_mode: bool,
 }
 
-impl Default for XrefConfig {
+impl Default for VersionConfig {
     fn default() -> Self {
         Self {
             max_concurrent: num_cpus::get(),
-            timeout: Duration::from_secs(300),
+            timeout: Duration::from_secs(60),
             enable_cache: true,
             deep_analysis: true,
-            validate_offsets: true,
-            check_duplicates: true,
+            strict_mode: false,
         }
     }
 }
 
-pub struct XrefHandler {
+/// PDF version handler
+pub struct VersionHandler {
     /// Handler state
-    state: Arc<RwLock<XrefState>>,
+    state: Arc<RwLock<VersionState>>,
     /// Rate limiter
     rate_limiter: Arc<Semaphore>,
     /// Metrics collector
     metrics: Arc<MetricsCollector>,
     /// Configuration
-    config: Arc<XrefConfig>,
+    config: Arc<VersionConfig>,
     /// Event channel
-    event_tx: broadcast::Sender<XrefEvent>,
+    event_tx: broadcast::Sender<VersionEvent>,
 }
 
+/// Version analysis event
 #[derive(Debug, Clone)]
-pub enum XrefEvent {
+pub enum VersionEvent {
     /// Analysis started
     AnalysisStarted {
         document_id: String,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
-    /// Table found
-    TableFound {
+    /// Version detected
+    VersionDetected {
         document_id: String,
-        table_type: XrefTableType,
-        offset: u64,
+        version: PdfVersion,
     },
-    /// Invalid entry found
-    InvalidEntryFound {
+    /// Mismatch found
+    MismatchFound {
         document_id: String,
-        invalid_entry: InvalidEntry,
+        mismatch: VersionMismatch,
     },
     /// Analysis completed
     AnalysisCompleted {
         document_id: String,
-        result: XrefAnalysis,
+        result: VersionAnalysis,
     },
     /// Analysis failed
     AnalysisFailed {
@@ -269,21 +255,20 @@ pub enum XrefEvent {
     },
 }
 
-impl XrefHandler {
-    /// Creates a new cross-reference handler
+impl VersionHandler {
+    /// Creates a new version handler
     #[instrument(skip(metrics))]
-    pub fn new(config: XrefConfig, metrics: Arc<MetricsCollector>) -> Self {
-        info!("Initializing XrefHandler");
+    pub fn new(config: VersionConfig, metrics: Arc<MetricsCollector>) -> Self {
+        info!("Initializing VersionHandler");
         
         let (event_tx, _) = broadcast::channel(100);
 
         Self {
-            state: Arc::new(RwLock::new(XrefState {
+            state: Arc::new(RwLock::new(VersionState {
                 active_analyses: 0,
-                analysis_results: DashMap::new(),
+                analysis_results: HashMap::new(),
                 analysis_history: Vec::new(),
                 start_time: Instant::now(),
-                bytes_analyzed: 0,
             })),
             rate_limiter: Arc::new(Semaphore::new(config.max_concurrent)),
             metrics,
@@ -292,10 +277,10 @@ impl XrefHandler {
         }
     }
 
-    /// Analyzes cross-reference tables
+    /// Analyzes PDF version
     #[instrument(skip(self, document), err(Debug))]
-    pub async fn analyze(&self, document: &Document) -> Result<XrefAnalysis> {
-        debug!("Starting cross-reference analysis for document {}", document.id());
+    pub async fn analyze_version(&self, document: &Document) -> Result<VersionAnalysis> {
+        debug!("Starting version analysis for document {}", document.id());
         
         let _permit = self.acquire_permit().await?;
         let start = Instant::now();
@@ -307,13 +292,13 @@ impl XrefHandler {
         }
 
         // Emit start event
-        let _ = self.event_tx.send(XrefEvent::AnalysisStarted {
+        let _ = self.event_tx.send(VersionEvent::AnalysisStarted {
             document_id: document.id().to_string(),
             timestamp: chrono::Utc::now(),
         });
 
         // Track metrics
-        self.metrics.increment_counter("xref_analyses_started").await;
+        self.metrics.increment_counter("version_analyses_started").await;
 
         // Try cache first if enabled
         if self.config.enable_cache {
@@ -330,13 +315,16 @@ impl XrefHandler {
             state.active_analyses -= 1;
             
             if let Ok(ref analysis) = result {
-                state.analysis_results.insert(document.id().to_string(), analysis.clone());
+                state.analysis_results.insert(
+                    document.id().to_string(),
+                    analysis.clone(),
+                );
                 state.analysis_history.push(AnalysisRecord {
                     document_id: document.id().to_string(),
                     start_time: start,
+                    version: analysis.header_version.clone(),
                     duration: start.elapsed(),
-                    tables_analyzed: analysis.xref_tables.len(),
-                    issues_found: analysis.invalid_entries.len(),
+                    issues_found: analysis.version_mismatches.len(),
                     success: true,
                 });
             }
@@ -345,13 +333,13 @@ impl XrefHandler {
         // Emit completion event
         match &result {
             Ok(analysis) => {
-                let _ = self.event_tx.send(XrefEvent::AnalysisCompleted {
+                let _ = self.event_tx.send(VersionEvent::AnalysisCompleted {
                     document_id: document.id().to_string(),
                     result: analysis.clone(),
                 });
             }
             Err(e) => {
-                let _ = self.event_tx.send(XrefEvent::AnalysisFailed {
+                let _ = self.event_tx.send(VersionEvent::AnalysisFailed {
                     document_id: document.id().to_string(),
                     error: e.to_string(),
                 });
@@ -360,32 +348,14 @@ impl XrefHandler {
 
         // Track metrics
         self.metrics.increment_counter(
-            if result.is_ok() { "xref_analyses_completed" } else { "xref_analyses_failed" }
+            if result.is_ok() { "version_analyses_completed" } else { "version_analyses_failed" }
         ).await;
-        self.metrics.observe_duration("xref_analysis_duration", start.elapsed()).await;
+        self.metrics.observe_duration("version_analysis_duration", start.elapsed()).await;
 
         result
     }
 
-    /// Gets cached analysis result if available
-    async fn get_cached_result(&self, document: &Document) -> Option<XrefAnalysis> {
-        self.state.read().await.analysis_results.get(&document.id().to_string()).cloned()
-    }
-
-    /// Acquires a permit for analysis
-    async fn acquire_permit(&self) -> Result<SemaphorePermit> {
-        match tokio::time::timeout(self.config.timeout, self.rate_limiter.acquire()).await {
-            Ok(Ok(permit)) => Ok(permit),
-            Ok(Err(e)) => Err(ForensicError::Concurrency(format!("Failed to acquire permit: {}", e))),
-            Err(_) => Err(ForensicError::Concurrency("Permit acquisition timeout".to_string())),
-        }
-    }
-
-    /// Performs cross-reference analysis
-    async fn perform_analysis(&self, document: &Document) -> Result<XrefAnalysis> {
-        // Implementation for cross-reference analysis
-        todo!("Implement cross-reference analysis")
-    }
+    // Implementation methods ...
 }
 
 #[cfg(test)]
@@ -403,75 +373,247 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_xref_analysis() {
+    async fn test_version_detection() {
         let metrics = Arc::new(MetricsCollector::new());
-        let config = XrefConfig::default();
-        let handler = XrefHandler::new(config, metrics.clone());
+        let config = VersionConfig::default();
+        let handler = VersionHandler::new(config, metrics.clone());
 
-        let test_data = b"%PDF-1.7\nxref\n0 1\n0000000000 65535 f\ntrailer";
+        let test_data = b"%PDF-1.7\n...";
         let test_file = create_test_file(test_data).await;
         let document = Document::new(test_file.path());
 
-        let result = handler.analyze(&document).await;
+        let result = handler.analyze_version(&document).await;
         assert!(result.is_ok());
 
         let analysis = result.unwrap();
-        assert!(!analysis.xref_tables.is_empty());
+        assert_eq!(analysis.header_version.major, 1);
+        assert_eq!(analysis.header_version.minor, 7);
     }
 
     #[tokio::test]
-    async fn test_invalid_entry_detection() {
+    async fn test_version_mismatch_detection() {
         let metrics = Arc::new(MetricsCollector::new());
-        let config = XrefConfig {
-            validate_offsets: true,
+        let config = VersionConfig {
+            strict_mode: true,
             ..Default::default()
         };
-        let handler = XrefHandler::new(config, metrics.clone());
+        let handler = VersionHandler::new(config, metrics.clone());
 
-        let test_data = b"%PDF-1.7\nxref\n0 1\n0000000xyz 65535 f\ntrailer";
+        let test_data = b"%PDF-1.7\n/Catalog /Version /1.4\n...";
         let test_file = create_test_file(test_data).await;
         let document = Document::new(test_file.path());
 
-        let result = handler.analyze(&document).await;
+        let result = handler.analyze_version(&document).await;
         assert!(result.is_ok());
 
         let analysis = result.unwrap();
-        assert!(!analysis.invalid_entries.is_empty());
+        assert!(!analysis.version_mismatches.is_empty());
+        assert_eq!(analysis.risk_assessment.risk_level, RiskLevel::Medium);
     }
 
     #[tokio::test]
-    async fn test_cache_functionality() {
+    async fn test_feature_compatibility() {
         let metrics = Arc::new(MetricsCollector::new());
-        let config = XrefConfig {
-            enable_cache: true,
-            ..Default::default()
-        };
-        let handler = XrefHandler::new(config, metrics.clone());
+        let config = VersionConfig::default();
+        let handler = VersionHandler::new(config, metrics.clone());
 
-        let test_data = b"%PDF-1.7\nxref\n0 1\n0000000000 65535 f\ntrailer";
+        let test_data = b"%PDF-1.4\n...";
         let test_file = create_test_file(test_data).await;
         let document = Document::new(test_file.path());
 
-        let result1 = handler.analyze(&document).await.unwrap();
-        let result2 = handler.analyze(&document).await.unwrap();
+        let result = handler.analyze_version(&document).await;
+        assert!(result.is_ok());
 
-        assert_eq!(result1.xref_tables.len(), result2.xref_tables.len());
+        let analysis = result.unwrap();
+        let compatibility = analysis.feature_compatibility;
+        assert!(!compatibility.required_features.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_analysis() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig {
+            max_concurrent: 2,
+            ..Default::default()
+        };
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let mut handles = Vec::new();
+        let mut files = Vec::new();
+
+        for i in 0..5 {
+            let test_data = format!("%PDF-1.{}\n...", i + 3).into_bytes();
+            let test_file = create_test_file(&test_data).await;
+            let document = Document::new(test_file.path());
+            files.push(test_file);
+
+            let handler = handler.clone();
+            handles.push(tokio::spawn(async move {
+                handler.analyze_version(&document).await
+            }));
+        }
+
+        let results: Vec<_> = futures::future::join_all(handles).await;
+        let successful = results.iter().filter(|r| r.as_ref().unwrap().is_ok()).count();
+        assert!(successful > 0 && successful < 5);
     }
 
     #[tokio::test]
     async fn test_metrics_collection() {
         let metrics = Arc::new(MetricsCollector::new());
-        let config = XrefConfig::default();
-        let handler = XrefHandler::new(config, metrics.clone());
+        let config = VersionConfig::default();
+        let handler = VersionHandler::new(config, metrics.clone());
 
-        let test_data = b"%PDF-1.7\nxref\n0 1\n0000000000 65535 f\ntrailer";
+        let test_data = b"%PDF-1.7\n...";
         let test_file = create_test_file(test_data).await;
         let document = Document::new(test_file.path());
 
-        let _ = handler.analyze(&document).await;
+        let _ = handler.analyze_version(&document).await;
 
         let counters = metrics.get_counters().await;
-        assert_eq!(counters.get("xref_analyses_started"), Some(&1));
-        assert!(counters.get("xref_analyses_completed").is_some());
+        assert_eq!(counters.get("version_analyses_started"), Some(&1));
+        assert!(counters.get("version_analyses_completed").is_some());
+        assert!(metrics.get_histogram("version_analysis
+        // ... (previous implementation remains same until tests module)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+    use tokio::fs::File;
+    use tokio::io::AsyncWriteExt;
+
+    async fn create_test_file(content: &[u8]) -> NamedTempFile {
+        let file = NamedTempFile::new().unwrap();
+        let mut async_file = File::create(file.path()).await.unwrap();
+        async_file.write_all(content).await.unwrap();
+        file
+    }
+
+    #[tokio::test]
+    async fn test_version_detection() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig::default();
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let test_data = b"%PDF-1.7\n...";
+        let test_file = create_test_file(test_data).await;
+        let document = Document::new(test_file.path());
+
+        let result = handler.analyze_version(&document).await;
+        assert!(result.is_ok());
+
+        let analysis = result.unwrap();
+        assert_eq!(analysis.header_version.major, 1);
+        assert_eq!(analysis.header_version.minor, 7);
+    }
+
+    #[tokio::test]
+    async fn test_version_mismatch_detection() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig {
+            strict_mode: true,
+            ..Default::default()
+        };
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let test_data = b"%PDF-1.7\n/Catalog /Version /1.4\n...";
+        let test_file = create_test_file(test_data).await;
+        let document = Document::new(test_file.path());
+
+        let result = handler.analyze_version(&document).await;
+        assert!(result.is_ok());
+
+        let analysis = result.unwrap();
+        assert!(!analysis.version_mismatches.is_empty());
+        assert_eq!(analysis.risk_assessment.risk_level, RiskLevel::Medium);
+    }
+
+    #[tokio::test]
+    async fn test_feature_compatibility() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig::default();
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let test_data = b"%PDF-1.4\n...";
+        let test_file = create_test_file(test_data).await;
+        let document = Document::new(test_file.path());
+
+        let result = handler.analyze_version(&document).await;
+        assert!(result.is_ok());
+
+        let analysis = result.unwrap();
+        let compatibility = analysis.feature_compatibility;
+        assert!(!compatibility.required_features.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_analysis() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig {
+            max_concurrent: 2,
+            ..Default::default()
+        };
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let mut handles = Vec::new();
+        let mut files = Vec::new();
+
+        for i in 0..5 {
+            let test_data = format!("%PDF-1.{}\n...", i + 3).into_bytes();
+            let test_file = create_test_file(&test_data).await;
+            let document = Document::new(test_file.path());
+            files.push(test_file);
+
+            let handler = handler.clone();
+            handles.push(tokio::spawn(async move {
+                handler.analyze_version(&document).await
+            }));
+        }
+
+        let results: Vec<_> = futures::future::join_all(handles).await;
+        let successful = results.iter().filter(|r| r.as_ref().unwrap().is_ok()).count();
+        assert!(successful > 0 && successful < 5);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_collection() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig::default();
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let test_data = b"%PDF-1.7\n...";
+        let test_file = create_test_file(test_data).await;
+        let document = Document::new(test_file.path());
+
+        let _ = handler.analyze_version(&document).await;
+
+        let counters = metrics.get_counters().await;
+        assert_eq!(counters.get("version_analyses_started"), Some(&1));
+        assert!(counters.get("version_analyses_completed").is_some());
+        assert!(metrics.get_histogram("version_analysis_duration").await.count > 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_functionality() {
+        let metrics = Arc::new(MetricsCollector::new());
+        let config = VersionConfig {
+            enable_cache: true,
+            ..Default::default()
+        };
+        let handler = VersionHandler::new(config, metrics.clone());
+
+        let test_data = b"%PDF-1.7\n...";
+        let test_file = create_test_file(test_data).await;
+        let document = Document::new(test_file.path());
+
+        // First analysis
+        let result1 = handler.analyze_version(&document).await.unwrap();
+        
+        // Second analysis (should use cache)
+        let result2 = handler.analyze_version(&document).await.unwrap();
+        
+        assert_eq!(result1.header_version, result2.header_version);
+        assert_eq!(result1.version_mismatches.len(), result2.version_mismatches.len());
     }
 }
