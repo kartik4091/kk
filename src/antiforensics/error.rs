@@ -1,216 +1,291 @@
-//! Error types for PDF anti-forensics operations
+//! Error types and handling for antiforensics library
+//! Created: 2025-06-03 11:31:05 UTC
 //! Author: kartik4091
-//! Created: 2025-06-03 10:19:43 UTC
-//! This module defines all error types used throughout the anti-forensics system.
 
 use std::{
-    error::Error,
-    fmt::{self, Display, Formatter},
+    error::Error as StdError,
+    fmt::{Display, Formatter, Result as FmtResult},
     io,
-    result,
+    result::Result as StdResult,
     sync::PoisonError,
 };
 use thiserror::Error;
+use tokio::sync::TryLockError;
+use tracing::error;
 
-/// Type alias for Result with ForensicError
-pub type Result<T> = result::Result<T, ForensicError>;
+/// Custom result type for antiforensics operations
+pub type Result<T> = StdResult<T, Error>;
 
-/// Main error type for anti-forensics operations
+/// Core error type for antiforensics operations
 #[derive(Error, Debug)]
-pub enum ForensicError {
-    /// Input/Output errors
-    #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
+pub enum Error {
+    #[error("Initialization error: {0}")]
+    InitializationError(String),
 
-    /// PDF parsing errors
-    #[error("PDF parsing error: {0}")]
-    PdfParse(String),
-
-    /// Validation errors
-    #[error("Validation error: {0}")]
-    Validation(String),
-
-    /// Security errors
-    #[error("Security error: {0}")]
-    Security(String),
-
-    /// Metadata errors
-    #[error("Metadata error: {0}")]
-    Metadata(String),
-
-    /// Resource errors
-    #[error("Resource error: {0}")]
-    Resource(String),
-
-    /// Configuration errors
     #[error("Configuration error: {0}")]
-    Config(String),
+    ConfigError(String),
 
-    /// State errors
-    #[error("State error: {0}")]
-    State(String),
+    #[error("PDF structure error: {0}")]
+    StructureError(#[from] StructureError),
 
-    /// Concurrency errors
-    #[error("Concurrency error: {0}")]
-    Concurrency(String),
+    #[error("Analysis error: {0}")]
+    AnalysisError(#[from] AnalysisError),
 
-    /// Processing errors
-    #[error("Processing error: {0}")]
-    Processing(String),
+    #[error("Cleaner error: {0}")]
+    CleanerError(#[from] CleanerError),
 
-    /// Verification errors
+    #[error("Encryption error: {0}")]
+    EncryptionError(#[from] EncryptionError),
+
+    #[error("Hash error: {0}")]
+    HashError(#[from] HashError),
+
+    #[error("Scanner error: {0}")]
+    ScannerError(#[from] ScannerError),
+
+    #[error("Stego error: {0}")]
+    StegoError(#[from] StegoError),
+
     #[error("Verification error: {0}")]
-    Verification(String),
+    VerificationError(#[from] VerificationError),
 
-    /// Cleanup errors
-    #[error("Cleanup error: {0}")]
-    Cleanup(String),
+    #[error("I/O error: {0}")]
+    IoError(#[from] io::Error),
+
+    #[error("Concurrency error: {0}")]
+    ConcurrencyError(String),
+
+    #[error("Resource error: {0}")]
+    ResourceError(String),
+
+    #[error("Timeout error: {0}")]
+    TimeoutError(String),
+
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }
 
-/// Error type for PDF structure operations
+/// PDF structure specific errors
 #[derive(Error, Debug)]
 pub enum StructureError {
-    /// Invalid PDF version
-    #[error("Invalid PDF version: {0}")]
-    InvalidVersion(String),
+    #[error("Invalid PDF header: {0}")]
+    InvalidHeader(String),
 
-    /// Cross-reference table errors
-    #[error("Cross-reference error: {0}")]
-    XrefError(String),
+    #[error("Invalid xref table: {0}")]
+    InvalidXref(String),
 
-    /// Trailer dictionary errors
-    #[error("Trailer error: {0}")]
-    TrailerError(String),
+    #[error("Invalid trailer: {0}")]
+    InvalidTrailer(String),
 
-    /// Object structure errors
-    #[error("Object error: {0}")]
-    ObjectError(String),
+    #[error("Invalid object stream: {0}")]
+    InvalidObjectStream(String),
 
-    /// Stream errors
-    #[error("Stream error: {0}")]
-    StreamError(String),
+    #[error("Missing required object: {0}")]
+    MissingObject(String),
+
+    #[error("Corrupted structure: {0}")]
+    Corrupted(String),
 }
 
-/// Error type for cleanup operations
+/// Analysis specific errors
 #[derive(Error, Debug)]
-pub enum CleanupError {
-    /// Stream cleaning errors
-    #[error("Stream cleaning error: {0}")]
-    StreamError(String),
+pub enum AnalysisError {
+    #[error("Pattern analysis failed: {0}")]
+    PatternError(String),
 
-    /// Binary cleaning errors
-    #[error("Binary cleaning error: {0}")]
-    BinaryError(String),
-
-    /// Content cleaning errors
-    #[error("Content cleaning error: {0}")]
+    #[error("Content analysis failed: {0}")]
     ContentError(String),
 
-    /// Structure cleaning errors
-    #[error("Structure cleaning error: {0}")]
-    StructureError(String),
+    #[error("Metadata analysis failed: {0}")]
+    MetadataError(String),
+
+    #[error("Version analysis failed: {0}")]
+    VersionError(String),
 }
 
-/// Error type for security operations
+/// Cleaner specific errors
 #[derive(Error, Debug)]
-pub enum SecurityError {
-    /// Encryption errors
-    #[error("Encryption error: {0}")]
-    EncryptionError(String),
+pub enum CleanerError {
+    #[error("Metadata cleaning failed: {0}")]
+    MetadataError(String),
 
-    /// Permission errors
-    #[error("Permission error: {0}")]
-    PermissionError(String),
+    #[error("Content cleaning failed: {0}")]
+    ContentError(String),
 
-    /// Signature errors
-    #[error("Signature error: {0}")]
+    #[error("Structure cleaning failed: {0}")]
+    StructureError(String),
+
+    #[error("Stream cleaning failed: {0}")]
+    StreamError(String),
+}
+
+/// Encryption specific errors
+#[derive(Error, Debug)]
+pub enum EncryptionError {
+    #[error("Key generation failed: {0}")]
+    KeyGenError(String),
+
+    #[error("Encryption failed: {0}")]
+    EncryptionFailed(String),
+
+    #[error("Decryption failed: {0}")]
+    DecryptionFailed(String),
+
+    #[error("Invalid algorithm: {0}")]
+    InvalidAlgorithm(String),
+}
+
+/// Hash specific errors
+#[derive(Error, Debug)]
+pub enum HashError {
+    #[error("Hash computation failed: {0}")]
+    ComputationError(String),
+
+    #[error("Invalid hash format: {0}")]
+    InvalidFormat(String),
+
+    #[error("Hash verification failed: {0}")]
+    VerificationError(String),
+}
+
+/// Scanner specific errors
+#[derive(Error, Debug)]
+pub enum ScannerError {
+    #[error("File scan failed: {0}")]
+    FileScanError(String),
+
+    #[error("Memory scan failed: {0}")]
+    MemoryScanError(String),
+
+    #[error("Network scan failed: {0}")]
+    NetworkScanError(String),
+
+    #[error("Process scan failed: {0}")]
+    ProcessScanError(String),
+}
+
+/// Steganography specific errors
+#[derive(Error, Debug)]
+pub enum StegoError {
+    #[error("Data embedding failed: {0}")]
+    EmbedError(String),
+
+    #[error("Data extraction failed: {0}")]
+    ExtractError(String),
+
+    #[error("Capacity error: {0}")]
+    CapacityError(String),
+}
+
+/// Verification specific errors
+#[derive(Error, Debug)]
+pub enum VerificationError {
+    #[error("Signature verification failed: {0}")]
     SignatureError(String),
 
-    /// Authentication errors
-    #[error("Authentication error: {0}")]
-    AuthError(String),
+    #[error("Certificate verification failed: {0}")]
+    CertificateError(String),
+
+    #[error("Integrity check failed: {0}")]
+    IntegrityError(String),
 }
 
-/// Error type for metadata operations
-#[derive(Error, Debug)]
-pub enum MetadataError {
-    /// Info dictionary errors
-    #[error("Info dictionary error: {0}")]
-    InfoError(String),
-
-    /// XMP metadata errors
-    #[error("XMP error: {0}")]
-    XmpError(String),
-
-    /// Document ID errors
-    #[error("Document ID error: {0}")]
-    DocIdError(String),
-
-    /// Timestamp errors
-    #[error("Timestamp error: {0}")]
-    TimestampError(String),
-}
-
-/// Error conversion implementations
-impl From<StructureError> for ForensicError {
-    fn from(err: StructureError) -> Self {
-        ForensicError::PdfParse(err.to_string())
-    }
-}
-
-impl From<CleanupError> for ForensicError {
-    fn from(err: CleanupError) -> Self {
-        ForensicError::Processing(err.to_string())
-    }
-}
-
-impl From<SecurityError> for ForensicError {
-    fn from(err: SecurityError) -> Self {
-        ForensicError::Security(err.to_string())
-    }
-}
-
-impl From<MetadataError> for ForensicError {
-    fn from(err: MetadataError) -> Self {
-        ForensicError::Metadata(err.to_string())
-    }
-}
-
-/// Thread safety error conversions
-impl<T> From<PoisonError<T>> for ForensicError {
+// Implement conversions for common error types
+impl<T> From<PoisonError<T>> for Error {
     fn from(err: PoisonError<T>) -> Self {
-        ForensicError::Concurrency(format!("Lock poisoned: {}", err))
+        Error::ConcurrencyError(format!("Lock poison error: {}", err))
     }
 }
 
+impl<T> From<TryLockError<T>> for Error {
+    fn from(err: TryLockError<T>) -> Self {
+        Error::ConcurrencyError(format!("Lock acquisition error: {}", err))
+    }
+}
+
+// Error context trait for adding context to errors
+pub trait ErrorContext<T, E> {
+    fn context(self, context: impl Display) -> StdResult<T, Error>;
+    fn with_context<F>(self, f: F) -> StdResult<T, Error>
+    where
+        F: FnOnce() -> String;
+}
+
+impl<T, E: StdError + 'static> ErrorContext<T, E> for StdResult<T, E> {
+    fn context(self, context: impl Display) -> StdResult<T, Error> {
+        self.map_err(|e| {
+            error!("{}: {}", context, e);
+            Error::InternalError(format!("{}: {}", context, e))
+        })
+    }
+
+    fn with_context<F>(self, f: F) -> StdResult<T, Error>
+    where
+        F: FnOnce() -> String,
+    {
+        self.map_err(|e| {
+            let context = f();
+            error!("{}: {}", context, e);
+            Error::InternalError(format!("{}: {}", context, e))
+        })
+    }
+}
+
+// Testing module
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_error_conversion() {
-        let structure_err = StructureError::InvalidVersion("1.8".to_string());
-        let forensic_err: ForensicError = structure_err.into();
-        assert!(matches!(forensic_err, ForensicError::PdfParse(_)));
-
-        let cleanup_err = CleanupError::StreamError("Failed to clean stream".to_string());
-        let forensic_err: ForensicError = cleanup_err.into();
-        assert!(matches!(forensic_err, ForensicError::Processing(_)));
-    }
-
-    #[test]
     fn test_error_display() {
-        let err = ForensicError::Security("Invalid password".to_string());
-        assert_eq!(err.to_string(), "Security error: Invalid password");
-
-        let err = MetadataError::XmpError("Invalid XMP".to_string());
-        assert_eq!(err.to_string(), "XMP error: Invalid XMP");
+        let err = Error::InitializationError("test error".into());
+        assert_eq!(err.to_string(), "Initialization error: test error");
     }
 
     #[test]
-    fn test_io_error_conversion() {
-        let io_err = io::Error::new(io::ErrorKind::NotFound, "File not found");
-        let forensic_err: ForensicError = io_err.into();
-        assert!(matches!(forensic_err, ForensicError::Io(_)));
+    fn test_error_context() {
+        let result: StdResult<(), std::io::Error> = 
+            Err(std::io::Error::new(std::io::ErrorKind::Other, "test error"));
+        
+        let with_context = result.context("Operation failed");
+        assert!(matches!(with_context, Err(Error::InternalError(_))));
     }
-  }
+
+    #[test]
+    fn test_error_conversion() {
+        let io_error = io::Error::new(io::ErrorKind::Other, "test error");
+        let err: Error = io_error.into();
+        assert!(matches!(err, Error::IoError(_)));
+    }
+
+    #[test]
+    fn test_structured_error_handling() {
+        let structure_err = StructureError::InvalidHeader("Invalid PDF version".into());
+        let err: Error = structure_err.into();
+        assert!(matches!(err, Error::StructureError(_)));
+    }
+}
+
+// Public error utilities
+pub mod utils {
+    use super::*;
+
+    /// Log and convert an error with context
+    pub fn log_error<E: StdError>(error: E, context: &str) -> Error {
+        error!("{}: {}", context, error);
+        Error::InternalError(format!("{}: {}", context, error))
+    }
+
+    /// Create a validation error with the given message
+    pub fn validation_error(msg: impl Into<String>) -> Error {
+        Error::ValidationError(msg.into())
+    }
+
+    /// Create a resource error with the given message
+    pub fn resource_error(msg: impl Into<String>) -> Error {
+        Error::ResourceError(msg.into())
+    }
+        }
