@@ -1,0 +1,132 @@
+cargo:rerun-if-env-changed=ZSTD_SYS_USE_PKG_CONFIG
+OUT_DIR = Some(/data/data/com.termux/files/home/kk/target/debug/build/zstd-sys-6ef88e4c1f043b05/out)
+OPT_LEVEL = Some(0)
+TARGET = Some(aarch64-linux-android)
+HOST = Some(aarch64-linux-android)
+cargo:rerun-if-env-changed=CC_aarch64-linux-android
+CC_aarch64-linux-android = None
+cargo:rerun-if-env-changed=CC_aarch64_linux_android
+CC_aarch64_linux_android = None
+cargo:rerun-if-env-changed=HOST_CC
+HOST_CC = None
+cargo:rerun-if-env-changed=CC
+CC = None
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+RUSTC_WRAPPER = None
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+DEBUG = Some(true)
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64_linux_android
+CFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64-linux-android
+CFLAGS_aarch64-linux-android = None
+CARGO_ENCODED_RUSTFLAGS = Some()
+OUT_DIR = Some(/data/data/com.termux/files/home/kk/target/debug/build/zstd-sys-6ef88e4c1f043b05/out)
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+TARGET = Some(aarch64-linux-android)
+HOST = Some(aarch64-linux-android)
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64_linux_android
+CFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64-linux-android
+CFLAGS_aarch64-linux-android = None
+OUT_DIR = Some(/data/data/com.termux/files/home/kk/target/debug/build/zstd-sys-6ef88e4c1f043b05/out)
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+TARGET = Some(aarch64-linux-android)
+HOST = Some(aarch64-linux-android)
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64_linux_android
+CFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64-linux-android
+CFLAGS_aarch64-linux-android = None
+OUT_DIR = Some(/data/data/com.termux/files/home/kk/target/debug/build/zstd-sys-6ef88e4c1f043b05/out)
+cargo:rerun-if-env-changed=CC_ENABLE_DEBUG_OUTPUT
+cargo:rerun-if-env-changed=CRATE_CC_NO_DEFAULTS
+CRATE_CC_NO_DEFAULTS = None
+TARGET = Some(aarch64-linux-android)
+HOST = Some(aarch64-linux-android)
+cargo:rerun-if-env-changed=CFLAGS
+CFLAGS = None
+cargo:rerun-if-env-changed=HOST_CFLAGS
+HOST_CFLAGS = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64_linux_android
+CFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=CFLAGS_aarch64-linux-android
+CFLAGS_aarch64-linux-android = None
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+exit status: 0
+cargo:rerun-if-env-changed=AR_aarch64-linux-android
+AR_aarch64-linux-android = None
+cargo:rerun-if-env-changed=AR_aarch64_linux_android
+AR_aarch64_linux_android = None
+cargo:rerun-if-env-changed=HOST_AR
+HOST_AR = None
+cargo:rerun-if-env-changed=AR
+AR = None
+LLVM (http://llvm.org/):
+  LLVM version 20.1.6
+  Optimized build.
+cargo:rerun-if-env-changed=ARFLAGS
+ARFLAGS = None
+cargo:rerun-if-env-changed=HOST_ARFLAGS
+HOST_ARFLAGS = None
+cargo:rerun-if-env-changed=ARFLAGS_aarch64_linux_android
+ARFLAGS_aarch64_linux_android = None
+cargo:rerun-if-env-changed=ARFLAGS_aarch64-linux-android
+ARFLAGS_aarch64-linux-android = None
+LLVM (http://llvm.org/):
+  LLVM version 20.1.6
+  Optimized build.
+cargo:rustc-link-lib=static=zstd
+cargo:rustc-link-search=native=/data/data/com.termux/files/home/kk/target/debug/build/zstd-sys-6ef88e4c1f043b05/out
+cargo:root=/data/data/com.termux/files/home/kk/target/debug/build/zstd-sys-6ef88e4c1f043b05/out
+cargo:include=/data/data/com.termux/files/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-sys-2.0.15+zstd.1.5.7/zstd/lib

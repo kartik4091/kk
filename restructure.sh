@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/data/data/com.termux/files/usr/bin/bashx
 
 # PDF Anti-Forensics Project Restructure Script
 # Author: kartik4091
@@ -82,71 +82,4 @@ EOF
 # verifier/mod.rs
 mkdir -p src/antiforensics/verifier
 cat > src/antiforensics/verifier/mod.rs << 'EOF'
-//! Verifier module for PDF document verification
-//! Author: kartik4091
-//! Created: 2025-06-03 07:23:09 UTC
-
-pub mod forensic_verifier;
-pub mod security_verifier;
-pub mod chain_verifier;
-EOF
-
-# report/mod.rs
-mkdir -p src/antiforensics/report
-cat > src/antiforensics/report/mod.rs << 'EOF'
-//! Report module for PDF document analysis reports
-//! Author: kartik4091
-//! Created: 2025-06-03 07:23:09 UTC
-
-pub mod generator;
-pub mod templates;
-pub mod formatter;
-EOF
-
-# Update main module declarations
-cat > src/antiforensics/mod.rs << 'EOF'
-//! Antiforensics module for secure PDF document sanitization
-//! Author: kartik4091
-//! Last Modified: 2025-06-03 07:23:09 UTC
-
-pub mod analyzer;
-pub mod scanner;
-pub mod cleaner;
-pub mod verifier;
-pub mod report;
-pub mod utils;
-
-// Re-exports
-pub use analyzer::{Analyzer, AnalyzerConfig};
-pub use scanner::{Scanner, ScannerConfig};
-pub use cleaner::{Cleaner, CleanerConfig};
-pub use verifier::{Verifier, VerifierConfig};
-pub use report::ReportGenerator;
-EOF
-
-# Update scanner module declarations
-cat > src/antiforensics/scanner/mod.rs << 'EOF'
-//! Scanner module for PDF document analysis
-//! Author: kartik4091
-//! Last Modified: 2025-06-03 07:23:09 UTC
-
-pub mod deep_scanner;
-pub mod signature_scanner;
-pub mod stream_scanner;
-pub mod object_scanner;
-
-pub use deep_scanner::DeepScanner;
-pub use signature_scanner::SignatureScanner;
-pub use stream_scanner::StreamScanner;
-pub use object_scanner::ObjectScanner;
-EOF
-
-# Create .gitkeep files for empty directories
-find src/antiforensics -type d -empty -exec touch {}/.gitkeep \;
-
-echo "Structure update complete!"
-echo "Backup created in: $BACKUP_DIR"
-echo "Next steps:"
-echo "1. Review the changes"
-echo "2. Check cargo build"
-echo "3. Commit the changes"
+//! Verifier module for PDF document verif
