@@ -1,441 +1,407 @@
-// Auto-generated for kartik4091/kk
-// Timestamp: 2025-06-02 05:19:25
-// User: kartik4091
-
-use async_trait::async_trait;
+use crate::{metrics::MetricsRegistry, PdfError, WriterConfig};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, instrument, warn};
-use crate::core::error::PdfError;
+use lopdf::{Document, Object, ObjectId, Stream, Dictionary};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+};
+use image::{DynamicImage, ImageFormat};
 
-#[derive(Debug, thiserror::Error)]
-pub enum OptimizationError {
-    #[error("Compression error: {0}")]
-    CompressionError(String),
-    
-    #[error("Resource optimization error: {0}")]
-    ResourceError(String),
-    
-    #[error("Structure optimization error: {0}")]
-    StructureError(String),
-    
-    #[error("Analysis error: {0}")]
-    AnalysisError(String),
-    
-    #[error(transparent)]
-    Storage(#[from] std::io::Error),
-    
-    #[error(transparent)]
-    Core(#[from] PdfError),
+pub struct OptimizationSystem {
+    state: Arc<RwLock<OptimizationState>>,
+    config: OptimizationConfig,
+    metrics: Arc<MetricsRegistry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OptimizationState {
+    optimizations_performed: u64,
+    last_optimization: Option<DateTime<Utc>>,
+    active_optimizations: u32,
+    optimization_stats: HashMap<String, OptimizationStats>,
+}
+
+#[derive(Clone)]
 pub struct OptimizationConfig {
-    pub compression_level: CompressionLevel,
-    pub image_options: ImageOptimizationOptions,
-    pub structure_options: StructureOptimizationOptions,
-    pub resource_options: ResourceOptimizationOptions,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CompressionLevel {
-    None,
-    Fast,
-    Balanced,
-    Maximum,
-    Custom(u32),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ImageOptimizationOptions {
-    pub max_resolution: Option<(u32, u32)>,
-    pub compression_quality: u32,
-    pub convert_to_jpeg: bool,
-    pub downsample_threshold: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructureOptimizationOptions {
-    pub merge_pages: bool,
+    pub level: OptimizationLevel,
+    pub image_quality: u8,
+    pub max_image_resolution: u32,
+    pub enable_font_subsetting: bool,
     pub remove_unused_resources: bool,
-    pub linearize: bool,
-    pub optimize_fonts: bool,
+    pub merge_duplicate_resources: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceOptimizationOptions {
-    pub deduplicate_resources: bool,
-    pub compress_metadata: bool,
-    pub remove_thumbnails: bool,
-    pub optimize_streams: bool,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OptimizationLevel {
+    None,
+    Basic,
+    Standard,
+    Aggressive,
+}
+
+#[derive(Debug)]
+struct OptimizationStats {
+    original_size: u64,
+    optimized_size: u64,
+    timestamp: DateTime<Utc>,
+    techniques_applied: Vec<OptimizationTechnique>,
+}
+
+#[derive(Debug, Clone)]
+enum OptimizationTechnique {
+    ImageCompression,
+    FontSubsetting,
+    StreamCompression,
+    ResourceDeduplification,
+    StructureOptimization,
+}
+
+impl OptimizationSystem {
+    pub async fn new(
+        config: &WriterConfig,
+        metrics: Arc<MetricsRegistry>,
+    ) -> Result<Self, PdfError> {
+        Ok(Self {
+            state: Arc::new(RwLock::new(OptimizationState {
+                optimizations_performed: 0,
+                last_optimization: None,
+                active_optimizations: 0,
+                optimization_stats: HashMap::new(),
+            })),
+            config: OptimizationConfig::default(),
+            metrics,
+        })
+    }
+
+    pub async fn optimize_document(&self, doc: Document) -> Result<Document, PdfError> {
+        let start_time = std::time::Instant::now();
+        let mut optimized_doc = doc.clone();
+        let document_id = optimized_doc.get_id().unwrap_or_else(|| "unknown".to_string());
+
+        // Update state
+        {
+            let mut state = self.state.write().map_err(|_| 
+                PdfError::Processing("Failed to acquire state lock".to_string()))?;
+            state.active_optimizations += 1;
+        }
+
+        // Perform optimizations based on level
+        match self.config.level {
+            OptimizationLevel::None => (),
+            OptimizationLevel::Basic => {
+                self.optimize_images(&mut optimized_doc)?;
+                self.optimize_streams(&mut optimized_doc)?;
+            },
+            OptimizationLevel::Standard => {
+                self.optimize_images(&mut optimized_doc)?;
+                self.optimize_streams(&mut optimized_doc)?;
+                self.optimize_fonts(&mut optimized_doc)?;
+                self.merge_duplicate_resources(&mut optimized_doc)?;
+            },
+            OptimizationLevel::Aggressive => {
+                self.optimize_images(&mut optimized_doc)?;
+                self.optimize_streams(&mut optimized_doc)?;
+                self.optimize_fonts(&mut optimized_doc)?;
+                self.merge_duplicate_resources(&mut optimized_doc)?;
+                self.remove_unused_resources(&mut optimized_doc)?;
+                self.optimize_structure(&mut optimized_doc)?;
+            },
+        }
+
+        // Update metrics and state
+        {
+            let mut state = self.state.write().map_err(|_| 
+                PdfError::Processing("Failed to acquire state lock".to_string()))?;
+            
+            state.active_optimizations -= 1;
+            state.optimizations_performed += 1;
+            state.last_optimization = Some(Utc::parse_from_str(
+                "2025-06-02 18:46:04",
+                "%Y-%m-%d %H:%M:%S"
+            ).unwrap());
+
+            // Record optimization stats
+            let original_size = doc.size().unwrap_or(0) as u64;
+            let optimized_size = optimized_doc.size().unwrap_or(0) as u64;
+            
+            state.optimization_stats.insert(document_id.clone(), OptimizationStats {
+                original_size,
+                optimized_size,
+                timestamp: Utc::now(),
+                techniques_applied: self.get_applied_techniques(),
+            });
+        }
+
+        self.metrics.optimization_time.observe(start_time.elapsed().as_secs_f64());
+        if let Ok(savings) = i64::try_from(doc.size().unwrap_or(0) - optimized_doc.size().unwrap_or(0)) {
+            self.metrics.optimization_savings.inc_by(savings as f64);
+        }
+
+        Ok(optimized_doc)
+    }
+
+    fn optimize_images(&self, doc: &mut Document) -> Result<(), PdfError> {
+        let image_objects: Vec<ObjectId> = doc.objects.iter()
+            .filter(|(_, obj)| self.is_image_stream(obj))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in image_objects {
+            if let Some(Object::Stream(ref mut stream)) = doc.objects.get_mut(&id) {
+                if let Ok(image_data) = self.extract_image_data(stream) {
+                    if let Ok(optimized_data) = self.optimize_image_data(image_data) {
+                        stream.content = optimized_data;
+                        stream.dict.set("Length", Object::Integer(stream.content.len() as i64));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_image_stream(&self, obj: &Object) -> bool {
+        if let Object::Stream(ref stream) = obj {
+            if let Ok(subtype) = stream.dict.get("Subtype") {
+                return matches!(subtype, &Object::Name(ref n) if n == "Image");
+            }
+        }
+        false
+    }
+
+    fn extract_image_data(&self, stream: &Stream) -> Result<Vec<u8>, PdfError> {
+        // In production, implement proper image data extraction based on color space and filters
+        Ok(stream.content.clone())
+    }
+
+    fn optimize_image_data(&self, data: Vec<u8>) -> Result<Vec<u8>, PdfError> {
+        // Load image
+        let img = image::load_from_memory(&data)
+            .map_err(|e| PdfError::Processing(format!("Failed to load image: {}", e)))?;
+
+        // Resize if needed
+        let img = self.resize_image_if_needed(img);
+
+        // Compress with specified quality
+        let mut buffer = Vec::new();
+        img.write_to(&mut buffer, ImageFormat::Jpeg)
+            .map_err(|e| PdfError::Processing(format!("Failed to optimize image: {}", e)))?;
+
+        Ok(buffer)
+    }
+
+    fn resize_image_if_needed(&self, img: DynamicImage) -> DynamicImage {
+        let (width, height) = img.dimensions();
+        if width > self.config.max_image_resolution || height > self.config.max_image_resolution {
+            let ratio = width as f32 / height as f32;
+            let new_width;
+            let new_height;
+
+            if width > height {
+                new_width = self.config.max_image_resolution;
+                new_height = (self.config.max_image_resolution as f32 / ratio) as u32;
+            } else {
+                new_height = self.config.max_image_resolution;
+                new_width = (self.config.max_image_resolution as f32 * ratio) as u32;
+            }
+
+            img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3)
+        } else {
+            img
+        }
+    }
+
+    fn optimize_streams(&self, doc: &mut Document) -> Result<(), PdfError> {
+        for obj in doc.objects.values_mut() {
+            if let Object::Stream(ref mut stream) = obj {
+                if !self.is_image_stream(&Object::Stream(stream.clone())) {
+                    // Optimize non-image streams (e.g., content streams)
+                    stream.content = self.optimize_stream_content(&stream.content)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn optimize_stream_content(&self, content: &[u8]) -> Result<Vec<u8>, PdfError> {
+        // Implement stream content optimization (e.g., removing unnecessary whitespace)
+        // For now, return the original content
+        Ok(content.to_vec())
+    }
+
+    fn optimize_fonts(&self, doc: &mut Document) -> Result<(), PdfError> {
+        if !self.config.enable_font_subsetting {
+            return Ok(());
+        }
+
+        let font_objects: Vec<ObjectId> = doc.objects.iter()
+            .filter(|(_, obj)| self.is_font_dictionary(obj))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in font_objects {
+            if let Some(Object::Dictionary(ref mut dict)) = doc.objects.get_mut(&id) {
+                self.subset_font(dict)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_font_dictionary(&self, obj: &Object) -> bool {
+        if let Object::Dictionary(ref dict) = obj {
+            if let Ok(type_name) = dict.get("Type") {
+                return matches!(type_name, &Object::Name(ref n) if n == "Font");
+            }
+        }
+        false
+    }
+
+    fn subset_font(&self, dict: &mut Dictionary) -> Result<(), PdfError> {
+        // Implement font subsetting logic
+        // This would involve:
+        // 1. Analyzing used characters
+        // 2. Creating a subset of the font
+        // 3. Updating font dictionary and related structures
+        Ok(())
+    }
+
+    fn merge_duplicate_resources(&self, doc: &mut Document) -> Result<(), PdfError> {
+        if !self.config.merge_duplicate_resources {
+            return Ok(());
+        }
+
+        let mut resource_map: HashMap<String, ObjectId> = HashMap::new();
+        let duplicates: Vec<ObjectId> = Vec::new();
+
+        // Find and merge duplicate resources
+        // This is a simplified version; in production, implement proper resource comparison
+        for (id, obj) in doc.objects.iter() {
+            if let Object::Stream(ref stream) = obj {
+                let hash = self.calculate_resource_hash(stream)?;
+                if let Some(&existing_id) = resource_map.get(&hash) {
+                    duplicates.push(*id);
+                    self.update_references(doc, *id, existing_id)?;
+                } else {
+                    resource_map.insert(hash, *id);
+                }
+            }
+        }
+
+        // Remove duplicate objects
+        for id in duplicates {
+            doc.objects.remove(&id);
+        }
+
+        Ok(())
+    }
+
+    fn calculate_resource_hash(&self, stream: &Stream) -> Result<String, PdfError> {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&stream.content);
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn update_references(&self, doc: &mut Document, from: ObjectId, to: ObjectId) -> Result<(), PdfError> {
+        // Update all references from the duplicate object to the original
+        // This would involve traversing the document and updating all references
+        Ok(())
+    }
+
+    fn remove_unused_resources(&self, doc: &mut Document) -> Result<(), PdfError> {
+        if !self.config.remove_unused_resources {
+            return Ok(());
+        }
+
+        let used_objects = self.find_used_objects(doc);
+        let all_objects: HashSet<ObjectId> = doc.objects.keys().copied().collect();
+        
+        // Remove unused objects
+        for id in all_objects.difference(&used_objects) {
+            doc.objects.remove(id);
+        }
+
+        Ok(())
+    }
+
+    fn find_used_objects(&self, doc: &Document) -> HashSet<ObjectId> {
+        let mut used = HashSet::new();
+        let mut to_visit = vec![doc.trailer.get("Root").and_then(|r| r.as_reference())];
+
+        while let Some(Some(id)) = to_visit.pop() {
+            if used.insert(id) {
+                if let Some(obj) = doc.objects.get(&id) {
+                    self.collect_references(obj, &mut to_visit);
+                }
+            }
+        }
+
+        used
+    }
+
+    fn collect_references(&self, obj: &Object, refs: &mut Vec<Option<ObjectId>>) {
+        match obj {
+            Object::Reference(id) => refs.push(Some(*id)),
+            Object::Array(arr) => {
+                for item in arr {
+                    self.collect_references(item, refs);
+                }
+            }
+            Object::Dictionary(dict) => {
+                for value in dict.values() {
+                    self.collect_references(value, refs);
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn optimize_structure(&self, doc: &mut Document) -> Result<(), PdfError> {
+        // Implement document structure optimization
+        // This might include:
+        // - Optimizing page tree
+        // - Flattening optional content groups
+        // - Removing unnecessary levels of indirect references
+        Ok(())
+    }
+
+    fn get_applied_techniques(&self) -> Vec<OptimizationTechnique> {
+        let mut techniques = Vec::new();
+        match self.config.level {
+            OptimizationLevel::None => (),
+            OptimizationLevel::Basic => {
+                techniques.push(OptimizationTechnique::ImageCompression);
+                techniques.push(OptimizationTechnique::StreamCompression);
+            },
+            OptimizationLevel::Standard => {
+                techniques.push(OptimizationTechnique::ImageCompression);
+                techniques.push(OptimizationTechnique::StreamCompression);
+                techniques.push(OptimizationTechnique::FontSubsetting);
+                techniques.push(OptimizationTechnique::ResourceDeduplification);
+            },
+            OptimizationLevel::Aggressive => {
+                techniques.extend_from_slice(&[
+                    OptimizationTechnique::ImageCompression,
+                    OptimizationTechnique::StreamCompression,
+                    OptimizationTechnique::FontSubsetting,
+                    OptimizationTechnique::ResourceDeduplification,
+                    OptimizationTechnique::StructureOptimization,
+                ]);
+            },
+        }
+        techniques
+    }
 }
 
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
-            compression_level: CompressionLevel::Balanced,
-            image_options: ImageOptimizationOptions {
-                max_resolution: Some((2000, 2000)),
-                compression_quality: 85,
-                convert_to_jpeg: true,
-                downsample_threshold: 1.5,
-            },
-            structure_options: StructureOptimizationOptions {
-                merge_pages: true,
-                remove_unused_resources: true,
-                linearize: true,
-                optimize_fonts: true,
-            },
-            resource_options: ResourceOptimizationOptions {
-                deduplicate_resources: true,
-                compress_metadata: true,
-                remove_thumbnails: true,
-                optimize_streams: true,
-            },
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct OptimizationManager {
-    config: OptimizationConfig,
-    state: Arc<RwLock<OptimizationState>>,
-    metrics: Arc<OptimizationMetrics>,
-}
-
-#[derive(Debug, Default)]
-struct OptimizationState {
-    optimizations: HashMap<String, OptimizationResult>,
-    resource_cache: HashMap<String, ResourceInfo>,
-    pending_tasks: Vec<OptimizationTask>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationResult {
-    id: String,
-    original_size: usize,
-    optimized_size: usize,
-    compression_ratio: f64,
-    optimizations_applied: Vec<AppliedOptimization>,
-    start_time: DateTime<Utc>,
-    end_time: Option<DateTime<Utc>>,
-    status: OptimizationStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppliedOptimization {
-    optimization_type: OptimizationType,
-    size_reduction: usize,
-    duration: std::time::Duration,
-    details: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OptimizationType {
-    ImageCompression,
-    FontSubsetting,
-    ResourceDeduplication,
-    StreamCompression,
-    StructureOptimization,
-    Custom(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OptimizationStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Failed(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationTask {
-    id: String,
-    target_path: String,
-    options: OptimizationOptions,
-    priority: Priority,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationOptions {
-    target_size: Option<usize>,
-    preserve_quality: bool,
-    optimization_level: OptimizationLevel,
-    excluded_types: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OptimizationLevel {
-    Minimal,
-    Standard,
-    Aggressive,
-    Custom(HashMap<String, String>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Priority {
-    Low,
-    Normal,
-    High,
-    Critical,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceInfo {
-    hash: String,
-    size: usize,
-    resource_type: String,
-    optimization_history: Vec<OptimizationEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationEntry {
-    timestamp: DateTime<Utc>,
-    size_before: usize,
-    size_after: usize,
-    method: String,
-}
-
-#[derive(Debug)]
-struct OptimizationMetrics {
-    total_optimizations: prometheus::IntCounter,
-    bytes_saved: prometheus::Counter,
-    optimization_duration: prometheus::Histogram,
-    optimization_queue_size: prometheus::Gauge,
-}
-
-#[async_trait]
-pub trait Optimizer {
-    async fn optimize_document(&mut self, path: &str, options: OptimizationOptions) -> Result<OptimizationResult, OptimizationError>;
-    async fn get_optimization_status(&self, optimization_id: &str) -> Result<OptimizationStatus, OptimizationError>;
-    async fn cancel_optimization(&mut self, optimization_id: &str) -> Result<(), OptimizationError>;
-    async fn analyze_optimization_potential(&self, path: &str) -> Result<OptimizationAnalysis, OptimizationError>;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationAnalysis {
-    total_size: usize,
-    potential_savings: usize,
-    recommendations: Vec<OptimizationRecommendation>,
-    resource_breakdown: HashMap<String, usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OptimizationRecommendation {
-    optimization_type: OptimizationType,
-    estimated_savings: usize,
-    priority: Priority,
-    description: String,
-}
-
-impl OptimizationManager {
-    pub fn new(config: OptimizationConfig) -> Self {
-        let metrics = Arc::new(OptimizationMetrics::new());
-        
-        Self {
-            config,
-            state: Arc::new(RwLock::new(OptimizationState::default())),
-            metrics,
-        }
-    }
-
-    #[instrument(skip(self))]
-    pub async fn initialize(&self) -> Result<(), OptimizationError> {
-        info!("Initializing OptimizationManager");
-        Ok(())
-    }
-
-    async fn optimize_images(&self, data: &[u8]) -> Result<Vec<u8>, OptimizationError> {
-        let opts = &self.config.image_options;
-        // In a real implementation, this would perform actual image optimization
-        Ok(data.to_vec())
-    }
-
-    async fn optimize_structure(&self, data: &[u8]) -> Result<Vec<u8>, OptimizationError> {
-        let opts = &self.config.structure_options;
-        // In a real implementation, this would perform structural optimization
-        Ok(data.to_vec())
-    }
-
-    async fn optimize_resources(&self, data: &[u8]) -> Result<Vec<u8>, OptimizationError> {
-        let opts = &self.config.resource_options;
-        // In a real implementation, this would perform resource optimization
-        Ok(data.to_vec())
-    }
-
-    async fn calculate_compression_ratio(&self, original: usize, optimized: usize) -> f64 {
-        if original == 0 {
-            return 0.0;
-        }
-        1.0 - (optimized as f64 / original as f64)
-    }
-}
-
-#[async_trait]
-impl Optimizer for OptimizationManager {
-    #[instrument(skip(self))]
-    async fn optimize_document(&mut self, path: &str, options: OptimizationOptions) -> Result<OptimizationResult, OptimizationError> {
-        let timer = self.metrics.optimization_duration.start_timer();
-        let start_time = Utc::now();
-
-        let mut optimizations_applied = Vec::new();
-        let mut current_size = 0; // Would get actual file size in real implementation
-
-        // Image optimization
-        if !options.excluded_types.contains(&"images".to_string()) {
-            let start = std::time::Instant::now();
-            let original_size = current_size;
-            // Perform image optimization
-            let size_reduction = original_size - current_size;
-            
-            optimizations_applied.push(AppliedOptimization {
-                optimization_type: OptimizationType::ImageCompression,
-                size_reduction,
-                duration: start.elapsed(),
-                details: "Optimized images using configured compression settings".to_string(),
-            });
-        }
-
-        // Structure optimization
-        if !options.excluded_types.contains(&"structure".to_string()) {
-            let start = std::time::Instant::now();
-            let original_size = current_size;
-            // Perform structure optimization
-            let size_reduction = original_size - current_size;
-            
-            optimizations_applied.push(AppliedOptimization {
-                optimization_type: OptimizationType::StructureOptimization,
-                size_reduction,
-                duration: start.elapsed(),
-                details: "Optimized document structure".to_string(),
-            });
-        }
-
-        // Resource optimization
-        if !options.excluded_types.contains(&"resources".to_string()) {
-            let start = std::time::Instant::now();
-            let original_size = current_size;
-            // Perform resource optimization
-            let size_reduction = original_size - current_size;
-            
-            optimizations_applied.push(AppliedOptimization {
-                optimization_type: OptimizationType::ResourceDeduplication,
-                size_reduction,
-                duration: start.elapsed(),
-                details: "Optimized and deduplicated resources".to_string(),
-            });
-        }
-
-        let result = OptimizationResult {
-            id: uuid::Uuid::new_v4().to_string(),
-            original_size: current_size,
-            optimized_size: current_size,
-            compression_ratio: self.calculate_compression_ratio(current_size, current_size).await,
-            optimizations_applied,
-            start_time,
-            end_time: Some(Utc::now()),
-            status: OptimizationStatus::Completed,
-        };
-
-        let mut state = self.state.write().await;
-        state.optimizations.insert(result.id.clone(), result.clone());
-
-        timer.observe_duration();
-        self.metrics.total_optimizations.inc();
-        self.metrics.bytes_saved.inc_by((current_size - current_size) as f64);
-
-        Ok(result)
-    }
-
-    #[instrument(skip(self))]
-    async fn get_optimization_status(&self, optimization_id: &str) -> Result<OptimizationStatus, OptimizationError> {
-        let state = self.state.read().await;
-        
-        state.optimizations
-            .get(optimization_id)
-            .map(|result| result.status.clone())
-            .ok_or_else(|| OptimizationError::AnalysisError(
-                format!("Optimization not found: {}", optimization_id)
-            ))
-    }
-
-    #[instrument(skip(self))]
-    async fn cancel_optimization(&mut self, optimization_id: &str) -> Result<(), OptimizationError> {
-        let mut state = self.state.write().await;
-        
-        if let Some(optimization) = state.optimizations.get_mut(optimization_id) {
-            match optimization.status {
-                OptimizationStatus::Pending | OptimizationStatus::InProgress => {
-                    optimization.status = OptimizationStatus::Failed("Cancelled by user".to_string());
-                    optimization.end_time = Some(Utc::now());
-                    Ok(())
-                },
-                _ => Err(OptimizationError::AnalysisError(
-                    "Optimization cannot be cancelled in its current state".to_string()
-                )),
-            }
-        } else {
-            Err(OptimizationError::AnalysisError(
-                format!("Optimization not found: {}", optimization_id)
-            ))
-        }
-    }
-
-    #[instrument(skip(self))]
-    async fn analyze_optimization_potential(&self, path: &str) -> Result<OptimizationAnalysis, OptimizationError> {
-        // In a real implementation, this would analyze the actual document
-        let analysis = OptimizationAnalysis {
-            total_size: 1000000,
-            potential_savings: 300000,
-            recommendations: vec![
-                OptimizationRecommendation {
-                    optimization_type: OptimizationType::ImageCompression,
-                    estimated_savings: 150000,
-                    priority: Priority::High,
-                    description: "High resolution images can be compressed".to_string(),
-                },
-                OptimizationRecommendation {
-                    optimization_type: OptimizationType::ResourceDeduplication,
-                    estimated_savings: 100000,
-                    priority: Priority::Normal,
-                    description: "Duplicate resources found".to_string(),
-                },
-            ],
-            resource_breakdown: {
-                let mut breakdown = HashMap::new();
-                breakdown.insert("images".to_string(), 500000);
-                breakdown.insert("fonts".to_string(), 300000);
-                breakdown.insert("other".to_string(), 200000);
-                breakdown
-            },
-        };
-
-        Ok(analysis)
-    }
-}
-
-impl OptimizationMetrics {
-    fn new() -> Self {
-        Self {
-            total_optimizations: prometheus::IntCounter::new(
-                "optimization_total_operations",
-                "Total number of optimization operations"
-            ).unwrap(),
-            bytes_saved: prometheus::Counter::new(
-                "optimization_bytes_saved",
-                "Total number of bytes saved through optimization"
-            ).unwrap(),
-            optimization_duration: prometheus::Histogram::new(
-                "optimization_duration_seconds",
-                "Time taken for optimization operations"
-            ).unwrap(),
-            optimization_queue_size: prometheus::Gauge::new(
-                "optimization_queue_size",
-                "Current size of the optimization queue"
-            ).unwrap(),
+            level: OptimizationLevel::Standard,
+            image_quality: 85,
+            max_image_resolution: 2048,
+            enable_font_subsetting: true,
+            remove_unused_resources: true,
+            merge_duplicate_resources: true,
         }
     }
 }
@@ -445,22 +411,40 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn test_optimization_system_creation() {
+        let writer_config = WriterConfig::default();
+        let metrics = Arc::new(MetricsRegistry::new().unwrap());
+        let system = OptimizationSystem::new(&writer_config, metrics).await;
+        assert!(system.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_document_optimization() {
-        let mut manager = OptimizationManager::new(OptimizationConfig::default());
-
-        let options = OptimizationOptions {
-            target_size: Some(1000000),
-            preserve_quality: true,
-            optimization_level: OptimizationLevel::Standard,
-            excluded_types: Vec::new(),
-        };
-
-        let result = manager.optimize_document("/test/document.pdf", options).await.unwrap();
+        let writer_config = WriterConfig::default();
+        let metrics = Arc::new(MetricsRegistry::new().unwrap());
+        let system = OptimizationSystem::new(&writer_config, metrics).await.unwrap();
         
-        assert!(matches!(result.status, OptimizationStatus::Completed));
-        assert!(!result.optimizations_applied.is_empty());
+        let doc = Document::new();
+        let result = system.optimize_document(doc).await;
+        assert!(result.is_ok());
+    }
 
-        let analysis = manager.analyze_optimization_potential("/test/document.pdf").await.unwrap();
-        assert!(!analysis.recommendations.is_empty());
+    #[tokio::test]
+    async fn test_aggressive_optimization() {
+        let writer_config = WriterConfig::default();
+        let metrics = Arc::new(MetricsRegistry::new().unwrap());
+        let mut system = OptimizationSystem::new(&writer_config, metrics).await.unwrap();
+        
+        system.config.level = OptimizationLevel::Aggressive;
+        
+        let mut doc = Document::new();
+        // Add some content to optimize
+        doc.objects.insert(
+            (1, 0),
+            Object::Stream(Stream::new(Dictionary::new(), vec![0u8; 1000])),
+        );
+        
+        let result = system.optimize_document(doc).await;
+        assert!(result.is_ok());
     }
 }
