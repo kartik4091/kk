@@ -1,5 +1,5 @@
 use crate::{
-    PdfError, VerificationError, VerificatiWarning, ErrorSeverity,
+    PdfError, VerificationError, VerificationWarning, ErrorSeverity,
     verification::ComplianceStandard,
 };
 use chrono::{DateTime, Utc};
